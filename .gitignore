@@ -1,0 +1,56 @@
+# Byte-compiled / cached files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+*.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Logs
+logs/
+*.log
+debug.log
+nohup.out
+
+# Test artifacts
+.coverage
+*.cover
+htmlcov/
+.tox/
+nox/
+.pytest_cache/
+junit.xml
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Pyright / Mypy
+pyrightconfig.json
+.mypy_cache/
+
+# Compiled C extensions
+*.so
+
+# Misc
+*.bak
+
