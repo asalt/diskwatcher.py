@@ -16,8 +16,8 @@ def fake_directories(tmp_path):
     fake_media.mkdir(parents=True, exist_ok=True)
     logger.debug(f"Created fake directories: {fake_mnt}, {fake_media}")
 
-
     return [fake_mnt, fake_media]
+
 
 @patch("builtins.open")
 def test_get_mount_points(mock_open, fake_mounts):
@@ -49,8 +49,6 @@ def test_suggest_directories(mock_exists, mock_get_mounts, fake_directories):
     suggested = suggest_directories()
     logger.debug(f"Suggested directories: {suggested}")
 
-
     assert fake_directories[0] in suggested  # /mnt
     assert fake_directories[1] in suggested  # /media
     assert len(suggested) == 2  # Ensure both directories are found
-

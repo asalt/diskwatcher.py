@@ -2,6 +2,7 @@ import click
 import logging
 from pathlib import Path
 from diskwatcher.core.watcher import DiskWatcher
+from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils.logging import setup_logging, get_logger
 
 @click.group()
