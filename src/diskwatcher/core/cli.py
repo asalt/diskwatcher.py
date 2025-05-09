@@ -4,6 +4,7 @@ from pathlib import Path
 from diskwatcher.core.watcher import DiskWatcher
 from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils.logging import setup_logging, get_logger
+from diskwatcher.utils.devices import get_mount_info
 
 @click.group()
 @click.option("--log-level", default="info", help="Set logging level (debug, info, warning, error)")
@@ -26,8 +27,19 @@ def run(directory):
             return
         directory = suggested[0]  # Default to first suggestion
 
+    directory = Path(directory).resolve()
+
+
+    uuid = None
+    try:
+        info = get_mount_info(directory)
+        uuid = info["uuid"] or info["label"] or info["device"]
+    except Exception as e:
+        logger.warning(f"Could not resolve volume UUID: {e}")
+        uuid = directory
+
     logger.info(f"Starting DiskWatcher on {directory}")
-    watcher = DiskWatcher(directory)
+    watcher = DiskWatcher(directory, uuid=uuid)
     watcher.start()
 
 @main.command()

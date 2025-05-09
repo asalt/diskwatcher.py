@@ -22,6 +22,7 @@ def get_mount_points() -> List[Path]:
                 if len(parts) >= 2:
                     mount_dir = Path(parts[1])
                     if any(mount_dir.parts[:2] == Path(d).parts for d in DEFAULT_LINUX_DIRS):
+                        logger.info(f"Adding {mount_dir} to mount points")
                         mount_points.append(mount_dir)
     except Exception as e:
         logger.error(f"Error reading /proc/mounts: {e}")
