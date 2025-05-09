@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LINUX_DIRS = ["/mnt", "/media", "/run/media"]
 
-def get_mount_points() -> List[Path]:
+
+def get_mount_points_unix() -> List[Path]:
     """Detect mounted filesystems (Linux-specific for now)."""
     if platform.system() != "Linux":
         logger.warning("Mount point detection is currently only supported on Linux.")
@@ -21,13 +22,25 @@ def get_mount_points() -> List[Path]:
                 parts = line.split()
                 if len(parts) >= 2:
                     mount_dir = Path(parts[1])
-                    if any(mount_dir.parts[:2] == Path(d).parts for d in DEFAULT_LINUX_DIRS):
+                    if any(
+                        mount_dir.parts[:2] == Path(d).parts for d in DEFAULT_LINUX_DIRS
+                    ):
                         logger.info(f"Adding {mount_dir} to mount points")
                         mount_points.append(mount_dir)
     except Exception as e:
         logger.error(f"Error reading /proc/mounts: {e}")
 
     return mount_points
+
+
+def get_mount_points() -> List[Path]:
+    """Get mount points based on the operating system."""
+    if platform.system() == "Linux":
+        return get_mount_points_unix()
+    else:
+        logger.warning("Mount point detection is not implemented for this OS.")
+        return []
+
 
 def suggest_directories() -> List[Path]:
     """Suggest directories to monitor (defaulting to Linux-specific paths)."""
@@ -36,10 +49,10 @@ def suggest_directories() -> List[Path]:
         return mounts
     return [Path(d) for d in DEFAULT_LINUX_DIRS if Path(d).exists()]
 
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     suggested_dirs = suggest_directories()
     print("Suggested directories to monitor:")
     for d in suggested_dirs:
         print(f"  - {d}")
-
