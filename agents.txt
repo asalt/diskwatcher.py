@@ -1,0 +1,53 @@
+1. Principles
+
+Catalog Everything
+Keep the catalog authoritative: every file event ties back to a volume UUID, label, or device path so the library stays queryable even when drives are unplugged.
+
+Functional Core, Lean Edges
+Prefer pure helpers in `src/diskwatcher/core` and `src/diskwatcher/utils`. Use thin orchestrators for threads or subprocesses so tests stay fast and deterministic.
+
+SQLite as Source of Truth
+`~/.diskwatcher/diskwatcher.db` (see `db/init_db.py` and `sql/schema.sql`) is the canonical store. Schema changes must be additive, backwards compatible, and documented.
+
+Transparent Effects
+All filesystem walking, subprocess calls, and logging run through the existing wrappers. Add new effect layers explicitly so we can audit what touches the host.
+
+Observability Everywhere
+Use `diskwatcher.utils.logging` to emit structured events. Include disk identifiers, paths, and outcomes so operators can debug catalog gaps quickly.
+
+Device Safety First
+Introspect devices conservatively. Never format, mount, or write to disks; limit shell calls to read-only queries (`findmnt`, `lsblk`) via helpers.
+
+2. Practices
+
+Modules
+Put watcher coordination in `core/`, storage helpers in `db/`, and low-level adapters in `utils/`. New subpackages should come with tests and doc notes.
+
+Volume Identity
+Resolve mount metadata with `utils.devices.get_mount_info`. If the heuristic fails, add a fallback helper rather than duplicating subprocess logic.
+
+Database Changes
+Update `sql/schema.sql`, extend the functions in `db/events.py`, and add migration notes to the dev log whenever you persist new fields.
+
+Logging
+Favour `get_logger` + structured payloads over free-form strings. Include `volume_id`, `directory`, and relevant counts so dashboards stay useful.
+
+Tests
+Keep new tests under `tests/` and reuse fixtures in `tests/conftest.py`. Exercise CLI flows with Click's runner to cover threading and logging edge cases.
+
+CLI UX
+Add subcommands in `core/cli.py`, document flags in `README.md`, and make sure defaults still pick sensible directories when none are passed.
+
+3. Agent Rules of Engagement
+
+Stay inside the workspace (`caps.fs.root`).
+
+Route logs through `diskwatcher.utils.logging` instead of `print()` so records land in the JSONL stream.
+
+Respect resource limits and timeouts—you are monitoring disks, not stress-testing them.
+
+Do not import outside the allowed policy or reach into system paths without a helper.
+
+Always declare inputs, params, and outputs when you add new Steps or Plans.
+
+Bring curiosity and care; the catalog only works if every agent keeps the chain intact.
