@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import time
 import sqlite3
 from pathlib import Path
@@ -13,7 +14,7 @@ from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils.logging import setup_logging, get_logger
 from diskwatcher.db import init_db, query_events
 from diskwatcher.db.connection import DB_PATH
-from diskwatcher.db.events import summarize_by_volume
+from diskwatcher.db.events import summarize_by_volume, summarize_files, query_events_since
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 
 
@@ -167,6 +168,94 @@ def status(
                 f"{agg['volume_id']} @ {agg['directory']} => total={agg['total_events']}"
                 f" (created={agg['created']}, modified={agg['modified']}, deleted={agg['deleted']})"
             )
+
+
+@app.command()
+def dashboard(
+    limit: int = typer.Option(20, help="Number of files to display ordered by recent activity."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON payload instead of text."),
+) -> None:
+    """Show a compact summary of cataloged files and volumes."""
+
+    try:
+        with init_db() as conn:
+            files = summarize_files(conn, limit=limit)
+            volumes = summarize_by_volume(conn)
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+        return
+
+    if as_json:
+        payload = {"files": files, "volumes": volumes}
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    if not files:
+        typer.echo("No file activity recorded yet.")
+        return
+
+    typer.echo("Recent files:")
+    for row in files:
+        volume = row.get("volume_id") or "-"
+        last_event = row.get("last_event_type") or "unknown"
+        last_seen = row.get("last_seen") or ""
+        total = row.get("total_events") or 0
+        path = row.get("path") or ""
+        directory = row.get("directory") or ""
+
+        typer.echo(
+            f"- {path}\n"
+            f"  volume={volume} directory={directory}\n"
+            f"  last_event={last_event} at {last_seen} (events={total})"
+        )
+
+    if volumes:
+        typer.echo("\nBy volume:")
+        for agg in volumes:
+            typer.echo(
+                f"{agg['volume_id']} @ {agg['directory']} => total={agg['total_events']}"
+                f" (created={agg['created']}, modified={agg['modified']}, deleted={agg['deleted']})"
+            )
+
+
+@app.command()
+def stream(
+    limit: int = typer.Option(100, help="Maximum events to read per poll."),
+    interval: float = typer.Option(1.0, help="Seconds to wait between polls."),
+    max_iterations: int = typer.Option(0, hidden=True, help="Internal: stop after N polls."),
+) -> None:
+    """Emit new catalog events as NDJSON for piping into tools like VisiData."""
+
+    if limit <= 0:
+        raise typer.BadParameter("limit must be greater than zero")
+    if interval < 0:
+        raise typer.BadParameter("interval cannot be negative")
+
+    try:
+        with init_db(check_same_thread=False) as conn:
+            last_rowid = 0
+            iterations = 0
+
+            while True:
+                events = query_events_since(conn, last_rowid=last_rowid, limit=limit)
+                if events:
+                    for event in events:
+                        typer.echo(json.dumps(event))
+                    sys.stdout.flush()
+                    last_rowid = events[-1]["rowid"]
+
+                iterations += 1
+                if max_iterations and iterations >= max_iterations:
+                    break
+
+                try:
+                    time.sleep(interval)
+                except KeyboardInterrupt:
+                    break
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()

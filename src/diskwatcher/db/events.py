@@ -54,3 +54,49 @@ def summarize_by_volume(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         """
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def summarize_files(conn: sqlite3.Connection, limit: int = 20) -> List[Dict[str, Any]]:
+    """Return aggregated file activity ordered by most recent change."""
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT
+            e.path,
+            e.volume_id,
+            e.directory,
+            COUNT(*) AS total_events,
+            MIN(e.timestamp) AS first_seen,
+            MAX(e.timestamp) AS last_seen,
+            (
+                SELECT latest.event_type
+                FROM events AS latest
+                WHERE latest.path = e.path
+                  AND latest.volume_id = e.volume_id
+                ORDER BY latest.timestamp DESC
+                LIMIT 1
+            ) AS last_event_type
+        FROM events AS e
+        GROUP BY e.path, e.volume_id, e.directory
+        ORDER BY last_seen DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def query_events_since(
+    conn: sqlite3.Connection,
+    last_rowid: int = 0,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Fetch events with a rowid greater than ``last_rowid``."""
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT rowid AS rowid, * FROM events WHERE rowid > ? ORDER BY rowid ASC LIMIT ?",
+        (last_rowid, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]

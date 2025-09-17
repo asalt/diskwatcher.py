@@ -24,6 +24,9 @@ htmlcov/
 nox/
 .pytest_cache/
 junit.xml
+# Local integration captures (kept out of version control)
+tests/test_out/*
+!tests/test_out/README.md
 
 # Distribution / Packaging
 build/
@@ -53,4 +56,3 @@ pyrightconfig.json
 
 # Misc
 *.bak
-

@@ -49,6 +49,24 @@ diskwatcher status --json --limit 25 | jq
 The JSON payload contains two keys: `events` (recent rows ordered by timestamp)
 and `volumes` (aggregated metrics).
 
+### Browse catalog contents
+
+```bash
+diskwatcher dashboard --limit 15
+```
+
+- Shows the most recently touched files with their volume, directory, and event counts.
+- Pass `--json` to feed the aggregated `files`/`volumes` payload into notebooks or dashboards.
+
+### Stream live events
+
+```bash
+diskwatcher stream --interval 2 | vd -f jsonl -
+```
+
+- Emits new catalog entries as NDJSON, perfect for piping into VisiData, `jq`, or custom scripts.
+- Adjust `--limit` (per poll) and `--interval` (seconds between polls) to balance freshness and load.
+
 ### Apply migrations
 
 ```bash
@@ -97,6 +115,21 @@ identifiers so the catalog still records events.
   `python scripts/new_revision.py` for scripting) and commit the generated file.
 - Update `docs/dev_log.md` and `logs/agent_reflections.jsonl` at the end of each
   session to leave breadcrumbs for the next contributor.
+
+Integration tests that exercise real watcher threads are marked with
+`@pytest.mark.integration` and are skipped unless you pass `pytest --integration`.
+Use `pytest --keep-artifacts` to stash catalog/log files under `logs/artifacts`, or
+`pytest --artifact-dir /path/to/folder` to control where persistent outputs land. The
+integration suite now writes `events.json` and `status.json` next to the SQLite catalog
+so you can inspect the recorded activity after a run.
+
+When rehearsing with lab media (e.g. `/mnt/e`):
+- Create or reuse a writable folder such as `/mnt/e/diskwatcher_artifacts` and pass it
+  to `pytest tests/integration/test_end_to_end.py --integration --artifact-dir <path>`.
+- Populate a practice directory with just a few files so the watcher finishes quickly;
+  the test only needs to observe a small burst of activity.
+- Drop any scratch artifacts under `tests/test_out/` (ignored by git) and leave a note in
+  `docs/dev_log.md` when collaborators should review them.
 
 ### Developer utilities
 
