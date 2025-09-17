@@ -5,11 +5,11 @@ import os
 import threading
 import time
 from diskwatcher.utils.logging import get_logger
-from diskwatcher.db import log_event, init_db, create_schema
+from diskwatcher.db import log_event, init_db
 
 from pathlib import Path
 
-from threading import Event
+from threading import Event, Lock
 from typing import Optional
 
 # logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -24,6 +24,7 @@ class DiskWatcher(FileSystemEventHandler):
         path: str,
         uuid: str = None,
         conn: Optional[sqlite3.Connection] = None,
+        conn_lock: Optional[Lock] = None,
         log_to_db: bool = True,
     ):
         self.path = Path(path)
@@ -38,6 +39,7 @@ class DiskWatcher(FileSystemEventHandler):
             )
         self.uuid = uuid
         self.conn = conn
+        self.conn_lock = conn_lock
         self.log_to_db = log_to_db
 
     def on_modified(self, event):
@@ -57,15 +59,26 @@ class DiskWatcher(FileSystemEventHandler):
 
     def log_event(self, event_type: str, path: str):
         if self.conn:
-            logger.info(f"Logging event to existing connection: {self.conn}")
-            log_event(
-                self.conn,
-                event_type,
-                path,
-                str(self.path),
-                self.uuid,
-                str(os.getpid()),
-            )
+            logger.debug("Logging event to shared connection", extra={"uuid": self.uuid})
+            if self.conn_lock:
+                with self.conn_lock:
+                    log_event(
+                        self.conn,
+                        event_type,
+                        path,
+                        str(self.path),
+                        self.uuid,
+                        str(os.getpid()),
+                    )
+            else:
+                log_event(
+                    self.conn,
+                    event_type,
+                    path,
+                    str(self.path),
+                    self.uuid,
+                    str(os.getpid()),
+                )
         else:
             logger.info(f"Logging event to new connection")
             with init_db() as conn:
@@ -112,9 +125,7 @@ class DiskWatcher(FileSystemEventHandler):
                 return
             for fname in files:
                 full = Path(root) / fname
-                self.log_event(
-                    "existing", str(full), str(self.path), self.uuid, str(os.getpid())
-                )
+                self.log_event("existing", str(full))
 
 
 # class DiskWatcherThread(threading.Thread):
@@ -140,25 +151,28 @@ class DiskWatcherThread(threading.Thread):
         self,
         path: Path,
         uuid: Optional[str] = None,
-        conn=None,  # ⬅️ Optional shared SQLite connection
+        conn: Optional[sqlite3.Connection] = None,  # ⬅️ Optional shared SQLite connection
+        conn_lock: Optional[Lock] = None,
     ):
         super().__init__(daemon=True)
         self.path = path.resolve()
         self.uuid = uuid
         self.stop_event = threading.Event()
         self.conn = conn
+        self.conn_lock = conn_lock
 
         self.watcher = DiskWatcher(
             str(self.path),
             uuid=self.uuid,
             conn=self.conn,  # ⬅️ Pass shared connection
+            conn_lock=self.conn_lock,
         )
 
     def run(self):
         try:
             self.watcher.start(stop_event=self.stop_event)
         except Exception as e:
-            print(f"[{self.path}] Watcher error: {e}")
+            logger.exception("Watcher error", extra={"path": str(self.path)})
 
     def stop(self):
         self.stop_event.set()

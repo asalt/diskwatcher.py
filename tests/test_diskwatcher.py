@@ -3,10 +3,14 @@ import os
 import sqlite3
 import pytest
 import logging
+import threading
+import time
+
+import diskwatcher.db.connection as db_connection
+from diskwatcher.core.manager import DiskWatcherManager
 from diskwatcher.core.watcher import DiskWatcher, DiskWatcherThread
 from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileDeletedEvent
-import time
-import threading
+
 from diskwatcher.db import create_schema, query_events
 
 
@@ -160,3 +164,53 @@ def test_file_delete_triggers_event(tmp_path, temp_db):
         list(event)  # force evaluation
         assert event["event_type"] in ("deleted", "modified")
         # assert event["path"] == str(file_path)
+
+
+def test_archive_existing_files_logs_existing_event(tmp_path, temp_db):
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+    existing_file = watched_dir / "already_there.txt"
+    existing_file.write_text("hi")
+
+    watcher = DiskWatcher(str(watched_dir), conn=temp_db)
+    watcher.archive_existing_files()
+
+    events = query_events(temp_db, limit=5)
+    assert any(event["event_type"] == "existing" for event in events)
+
+
+def test_manager_reuses_single_connection(tmp_path, monkeypatch):
+    db_root = tmp_path / ".diskwatcher"
+    monkeypatch.setattr(db_connection, "DB_DIR", db_root, raising=False)
+    monkeypatch.setattr(db_connection, "DB_PATH", db_root / "diskwatcher.db", raising=False)
+
+    monkeypatch.setattr(
+        "diskwatcher.core.manager.get_mount_info",
+        lambda path: {"uuid": "test-vol", "label": "", "device": str(path)},
+        raising=False,
+    )
+
+    manager = DiskWatcherManager()
+    try:
+        watched_dir = tmp_path / "watched"
+        watched_dir.mkdir()
+
+        manager.add_directory(watched_dir, uuid="test-vol")
+        assert len(manager.threads) == 1
+        thread = manager.threads[0]
+
+        assert thread.conn is manager.conn
+        assert thread.watcher.conn is manager.conn
+        assert thread.watcher.conn_lock is manager.conn_lock
+
+        test_path = watched_dir / "manual.txt"
+        thread.watcher.log_event("created", str(test_path))
+
+        with manager.conn:
+            rows = manager.conn.execute(
+                "SELECT event_type, path FROM events WHERE path = ?", (str(test_path),)
+            ).fetchall()
+        assert rows and rows[0][0] == "created"
+    finally:
+        manager.threads.clear()
+        manager.stop_all()

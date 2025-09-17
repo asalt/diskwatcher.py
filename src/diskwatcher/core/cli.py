@@ -1,36 +1,50 @@
-import click
+import json
 import logging
 import time
+import sqlite3
 from pathlib import Path
-from diskwatcher.core.watcher import DiskWatcher
+from typing import List, Optional
+from urllib.parse import urlparse, unquote
+
+import typer
+
 from diskwatcher.core.manager import DiskWatcherManager
 from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils.logging import setup_logging, get_logger
-from diskwatcher.utils.devices import get_mount_info
+from diskwatcher.db import init_db, query_events
+from diskwatcher.db.connection import DB_PATH
+from diskwatcher.db.events import summarize_by_volume
+from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 
 
-@click.group()
-@click.option(
-    "--log-level",
-    default="info",
-    help="Set logging level (debug, info, warning, error)",
-)
-def main(log_level):
-    """DiskWatcher CLI - Monitor filesystem events"""
-    log_level = getattr(logging, log_level.upper(), logging.INFO)
-    setup_logging(level=log_level)
+app = typer.Typer(help="DiskWatcher CLI - Monitor filesystem events.", no_args_is_help=True)
+dev_app = typer.Typer(help="Developer tooling for migrations and catalog upkeep.")
+app.add_typer(dev_app, name="dev")
 
 
-@main.command()
-@click.argument("directories", nargs=-1, type=click.Path(exists=True))
-@click.option(
-    "--no-scan",
-    is_flag=True,
-    default=False,
-    show_default=True,
-    help="Skip initial archival scan of existing files",
-)
-def run(no_scan, directories):
+@app.callback()
+def main(log_level: str = typer.Option("info", help="Logging level (debug, info, warning, error)")) -> None:
+    """Entry point for the DiskWatcher CLI."""
+    resolved_level = getattr(logging, log_level.upper(), logging.INFO)
+    setup_logging(level=resolved_level)
+
+
+@app.command()
+def run(
+    directories: Optional[List[Path]] = typer.Argument(
+        None,
+        exists=True,
+        dir_okay=True,
+        file_okay=False,
+        resolve_path=True,
+        help="Directories to monitor. Leave empty to auto-detect."
+    ),
+    no_scan: bool = typer.Option(
+        False,
+        "--no-scan",
+        help="Skip initial archival scan of existing files.",
+    ),
+) -> None:
     """Start monitoring a directory (defaults to auto-detected mount points)."""
     logger = get_logger(__name__)
 
@@ -51,14 +65,17 @@ def run(no_scan, directories):
     manager.start_all()
 
     logger.info("Running... Press Ctrl+C to stop.")
+    counter = 0
     try:
         while True:
-            counter = 0
             time.sleep(1)
-            if counter % 10 == 0:
-                status = manager.status()
-                logger.debug(f"Current status: {status}")
             counter += 1
+            if counter % 10 == 0:
+                status_snapshot = manager.status()
+                logger.debug(
+                    "watcher_heartbeat",
+                    extra={"status": status_snapshot, "uptime_seconds": counter},
+                )
     except KeyboardInterrupt:
         manager.stop_all()
 
@@ -105,8 +122,8 @@ def run(no_scan, directories):
     # watcher.start()
 
 
-@main.command()
-def log():
+@app.command()
+def log() -> None:
     """Show recent log entries"""
     log_file = Path.home() / ".diskwatcher/diskwatcher.log"
     if log_file.exists():
@@ -115,29 +132,135 @@ def log():
         click.echo("No logs found.")
 
 
-@main.command()
-def status():
-    """show status"""
-    pass
+@app.command()
+def status(
+    limit: int = typer.Option(10, help="Number of recent events to display."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
+) -> None:
+    """Show a snapshot of recent catalog activity."""
+    try:
+        with init_db() as conn:
+            events = query_events(conn, limit=limit)
+            aggregates = summarize_by_volume(conn)
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+        return
+
+    if as_json:
+        payload = {"events": events, "volumes": aggregates}
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    if not events:
+        typer.echo("No events recorded yet.")
+    else:
+        typer.echo("Recent events:")
+        for event in events:
+            typer.echo(
+                f"{event['timestamp']} | {event['event_type']:>8} | {event['volume_id']} | {event['path']}"
+            )
+
+    if aggregates:
+        typer.echo("\nBy volume:")
+        for agg in aggregates:
+            typer.echo(
+                f"{agg['volume_id']} @ {agg['directory']} => total={agg['total_events']}"
+                f" (created={agg['created']}, modified={agg['modified']}, deleted={agg['deleted']})"
+            )
 
 
-@main.command()
-def suggest():
+@app.command()
+def suggest() -> None:
     """Inspect system and suggest directories to monitor."""
     from diskwatcher.core.inspector import suggest_directories
 
     suggested_dirs = suggest_directories()
     if not suggested_dirs:
-        click.echo("No suitable directories found.")
+        typer.echo("No suitable directories found.")
     else:
-        click.echo("Suggested directories to monitor:")
+        typer.echo("Suggested directories to monitor:")
         for d in suggested_dirs:
-            click.echo(f"  - {d}")
+            typer.echo(f"  - {d}")
 
 
-# Attach subcommands  not necessary with main.command
-# main.add_command(run)
-# main.add_command(log)
+@app.command()
+def migrate(
+    revision: str = typer.Option("head", help="Revision to upgrade to."),
+    url: Optional[str] = typer.Option(None, "--url", help="Override database URL."),
+) -> None:
+    """Run Alembic migrations against the catalog."""
+    migrate_upgrade(revision=revision, database_url=url)
+    typer.echo(f"Migrated catalog to {revision}")
+
+
+@dev_app.command("revision")
+def dev_revision(
+    message: str = typer.Option(..., "--message", "-m", help="Migration message."),
+    autogenerate: bool = typer.Option(False, "--autogenerate", help="Run Alembic autogenerate."),
+    url: Optional[str] = typer.Option(None, "--url", help="Database URL for autogenerate."),
+    ini: Optional[Path] = typer.Option(None, "--ini", help="Path to Alembic ini file."),
+) -> None:
+    """Create a new Alembic revision script."""
+
+    config = build_alembic_config(ini_path=ini, database_url=url)
+    from alembic import command as alembic_command  # Local import to keep CLI fast when unused.
+
+    alembic_command.revision(config, message=message, autogenerate=autogenerate)
+    typer.echo("Created new Alembic revision")
+
+
+def _sqlite_url_to_path(url: str) -> Path:
+    parsed = urlparse(url)
+    if parsed.scheme != "sqlite":
+        raise typer.BadParameter("Only sqlite URLs are supported for this command.")
+    raw_path = parsed.path
+    if parsed.netloc and not raw_path:
+        raw_path = parsed.netloc
+    path = unquote(raw_path)
+    if path.startswith("//"):
+        path = path[1:]
+    return Path(path)
+
+
+@dev_app.command("vacuum")
+def dev_vacuum(
+    url: Optional[str] = typer.Option(None, "--url", help="Database URL to vacuum."),
+) -> None:
+    """Run VACUUM on the catalog to reclaim space."""
+
+    target = url or f"sqlite:///{DB_PATH}"
+    db_file = _sqlite_url_to_path(target)
+    conn = sqlite3.connect(str(db_file))
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    typer.echo(f"Vacuumed catalog at {db_file}")
+
+
+@dev_app.command("integrity")
+def dev_integrity(
+    url: Optional[str] = typer.Option(None, "--url", help="Database URL to check."),
+) -> None:
+    """Run sqlite integrity_check and report the result."""
+
+    target = url or f"sqlite:///{DB_PATH}"
+    db_file = _sqlite_url_to_path(target)
+    conn = sqlite3.connect(str(db_file))
+    try:
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        conn.close()
+
+    status = result[0] if result else "unknown"
+    typer.echo(f"Catalog integrity_check: {status}")
+
+
+def entrypoint() -> None:
+    """Console script entrypoint."""
+
+    app()
+
 
 if __name__ == "__main__":
-    main()
+    entrypoint()

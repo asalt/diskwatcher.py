@@ -7,7 +7,7 @@ productive without breaking the catalog.
 
 ## Quick orientation
 - Read `README.md` for the product goals; keep it updated as the cataloger evolves.
-- Tour `src/diskwatcher/core/cli.py` for the Click entrypoint, then skim `core/manager.py` and `core/watcher.py` to see how watcher threads and UUID resolution fit together.
+- Tour `src/diskwatcher/core/cli.py` for the Typer entrypoint, then skim `core/manager.py` and `core/watcher.py` to see how watcher threads and UUID resolution fit together.
 - Storage lives in `src/diskwatcher/db/` and `src/diskwatcher/sql/`; these show how events land in SQLite and what schema we depend on.
 - Hardware discovery and volume identity helpers are in `src/diskwatcher/utils/devices.py`; touch them carefully and prefer new pure helpers over shelling out inline.
 - The expectations and guardrails in `agents.txt` are canonical—review them before shipping behaviour changes.
