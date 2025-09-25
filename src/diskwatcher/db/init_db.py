@@ -16,8 +16,14 @@ def init_db(path=None):
         path = DB_PATH
     logger.debug(f"Initializing database at {path}")
 
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     cur = conn.cursor()
+    cur.execute("PRAGMA foreign_keys = ON")
+    cur.execute("PRAGMA busy_timeout = 10000")
+    try:
+        cur.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS events (

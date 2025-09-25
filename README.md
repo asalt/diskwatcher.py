@@ -40,7 +40,8 @@ diskwatcher status
 ```
 
 Outputs the latest events plus a "By volume" summary indicating total, created,
-modified, and deleted counts per directory.
+modified, and deleted counts per directory. The view now folds in the persisted
+disk-usage snapshots so you can gauge free/used capacity per volume at a glance.
 
 Structured output is available for automation:
 
@@ -49,7 +50,8 @@ diskwatcher status --json --limit 25 | jq
 ```
 
 The JSON payload contains two keys: `events` (recent rows ordered by timestamp)
-and `volumes` (aggregated metrics).
+and `volumes` (aggregated metrics plus the persisted fields from the `volumes`
+table, including usage bytes and refresh timestamps).
 
 ### Browse catalog contents
 

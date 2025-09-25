@@ -4,7 +4,7 @@ import sys
 import time
 import sqlite3
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, unquote
 
 import typer
@@ -15,7 +15,12 @@ from diskwatcher.utils import config as config_utils
 from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
 from diskwatcher.db import init_db, query_events
 from diskwatcher.db.connection import DB_PATH, DB_DIR
-from diskwatcher.db.events import summarize_by_volume, summarize_files, query_events_since
+from diskwatcher.db.events import (
+    summarize_by_volume,
+    summarize_files,
+    query_events_since,
+    fetch_volume_metadata,
+)
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 
 
@@ -270,12 +275,15 @@ def status(
         with init_db() as conn:
             events = query_events(conn, limit=limit)
             aggregates = summarize_by_volume(conn)
+            volume_meta = fetch_volume_metadata(conn)
     except sqlite3.OperationalError:
         typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
         return
 
+    combined_volumes = _combine_volume_data(aggregates, volume_meta)
+
     if as_json:
-        payload = {"events": events, "volumes": aggregates}
+        payload = {"events": events, "volumes": combined_volumes}
         typer.echo(json.dumps(payload, indent=2))
         return
 
@@ -288,13 +296,116 @@ def status(
                 f"{event['timestamp']} | {event['event_type']:>8} | {event['volume_id']} | {event['path']}"
             )
 
-    if aggregates:
+    if combined_volumes:
         typer.echo("\nBy volume:")
-        for agg in aggregates:
+        for agg in combined_volumes:
+            total = agg.get("total_events", agg.get("event_count", 0))
             typer.echo(
-                f"{agg['volume_id']} @ {agg['directory']} => total={agg['total_events']}"
+                f"{agg['volume_id']} @ {agg['directory']} => total={total}"
                 f" (created={agg['created']}, modified={agg['modified']}, deleted={agg['deleted']})"
             )
+
+        typer.echo("\nVolume metadata:")
+        for meta in combined_volumes:
+            typer.echo(f"{meta['volume_id']} @ {meta['directory']}")
+            typer.echo(
+                "  events : "
+                f"stored={meta['event_count']} created={meta['created_count']} "
+                f"modified={meta['modified_count']} deleted={meta['deleted_count']}"
+            )
+            typer.echo(f"  usage  : {_format_usage_line(meta)}")
+
+
+def _combine_volume_data(
+    aggregates: List[Dict[str, Any]],
+    metadata: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    meta_by_id = {row["volume_id"]: row for row in metadata}
+    combined: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for agg in aggregates:
+        meta = meta_by_id.get(agg["volume_id"])
+        combined.append(_merge_volume_row(agg, meta))
+        seen.add(agg["volume_id"])
+
+    for meta in metadata:
+        if meta["volume_id"] not in seen:
+            combined.append(
+                _merge_volume_row(
+                    {
+                        "volume_id": meta["volume_id"],
+                        "directory": meta["directory"],
+                        "total_events": meta["event_count"],
+                        "created": meta["created_count"],
+                        "modified": meta["modified_count"],
+                        "deleted": meta["deleted_count"],
+                    },
+                    meta,
+                )
+            )
+
+    return combined
+
+
+def _merge_volume_row(agg: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    row = dict(agg)
+    if meta:
+        row.setdefault("directory", meta["directory"])
+        row["event_count"] = meta.get("event_count", row.get("total_events", 0))
+        row["created_count"] = meta.get("created_count", row.get("created", 0))
+        row["modified_count"] = meta.get("modified_count", row.get("modified", 0))
+        row["deleted_count"] = meta.get("deleted_count", row.get("deleted", 0))
+        row["usage_total_bytes"] = meta.get("usage_total_bytes")
+        row["usage_used_bytes"] = meta.get("usage_used_bytes")
+        row["usage_free_bytes"] = meta.get("usage_free_bytes")
+        row["usage_refreshed_at"] = meta.get("usage_refreshed_at")
+        row.setdefault("last_event_timestamp", meta.get("last_event_timestamp"))
+    else:
+        row.setdefault("event_count", row.get("total_events", 0))
+        row.setdefault("created_count", row.get("created", 0))
+        row.setdefault("modified_count", row.get("modified", 0))
+        row.setdefault("deleted_count", row.get("deleted", 0))
+        row.setdefault("usage_total_bytes", None)
+        row.setdefault("usage_used_bytes", None)
+        row.setdefault("usage_free_bytes", None)
+        row.setdefault("usage_refreshed_at", None)
+
+    row.setdefault("total_events", row.get("event_count", 0))
+    row.setdefault("created", row.get("created_count", 0))
+    row.setdefault("modified", row.get("modified_count", 0))
+    row.setdefault("deleted", row.get("deleted_count", 0))
+    return row
+
+
+def _format_usage_line(meta: Dict[str, Any]) -> str:
+    total = meta.get("usage_total_bytes")
+    used = meta.get("usage_used_bytes")
+    free = meta.get("usage_free_bytes")
+    refreshed = meta.get("usage_refreshed_at") or "-"
+
+    if total in (None, 0) or used is None or free is None:
+        return f"unavailable (refreshed {refreshed})"
+
+    percent = (used / total) * 100 if total else 0
+    return (
+        f"{_format_bytes(used)} / {_format_bytes(total)} ({percent:.1f}% used, free {_format_bytes(free)})"
+        f" refreshed {refreshed}"
+    )
+
+
+def _format_bytes(value: Optional[int]) -> str:
+    if value is None:
+        return "-"
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    amount = float(value)
+    idx = 0
+    while amount >= 1024 and idx < len(units) - 1:
+        amount /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(amount)} {units[idx]}"
+    return f"{amount:.1f} {units[idx]}"
 
 
 @app.command()

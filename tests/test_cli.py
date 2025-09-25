@@ -140,6 +140,7 @@ def test_status_shows_recent_events(monkeypatch, tmp_path):
     assert "vol-1" in result.output
     assert "By volume:" in result.output
     assert "total=2" in result.output
+    assert "Volume metadata:" in result.output
 
 
 def test_status_handles_empty_catalog(monkeypatch, tmp_path):
@@ -169,8 +170,14 @@ def test_status_json_output(monkeypatch, tmp_path):
     result = runner.invoke(app, ["status", "--json"])
 
     assert result.exit_code == 0
-    assert "\"events\"" in result.output
-    assert "vol-json" in result.output
+    payload = _stdout_json(result.output)
+    assert "events" in payload
+    volumes = payload["volumes"]
+    assert isinstance(volumes, list)
+    target = next((row for row in volumes if row["volume_id"] == "vol-json"), None)
+    assert target is not None
+    assert target["usage_total_bytes"] is not None
+    assert target["event_count"] >= 1
 
 
 def test_dashboard_lists_recent_files(monkeypatch, tmp_path):

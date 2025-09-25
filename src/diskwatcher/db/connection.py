@@ -23,7 +23,9 @@ def init_db(
         str(target_path),
         check_same_thread=check_same_thread,
         isolation_level=isolation_level,
+        timeout=30.0,
     )
+    _configure_connection(conn)
     create_schema(conn)
     return conn
 
@@ -58,3 +60,15 @@ def create_schema(conn: sqlite3.Connection, schema_path: Path = SCHEMA_PATH) -> 
             "INSERT INTO alembic_version (version_num) VALUES (?)",
             (BASELINE_REVISION,),
         )
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    """Apply common pragmas so high-volume writes stay resilient."""
+
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        # WAL is not supported for in-memory databases; ignore quietly.
+        pass

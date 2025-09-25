@@ -13,6 +13,8 @@ tags: [feature, db]
 - Added Alembic migration + schema updates for `volumes` and `files` tables, and wired disk usage sampling with lightweight refresh heuristics (`migrations/versions/0002_volume_and_file_metadata.py`, `src/diskwatcher/db/events.py:130`).
 - File upserts now capture size/mtime while delete markers keep the row for history; volume rows cache usage totals and event counters for richer dashboards (`src/diskwatcher/db/events.py:200`).
 - CLI `config show` surfaces storage paths so operators know where the DB/logs/config live, and README documents the storage layout (`src/diskwatcher/core/cli.py:182`, `README.md:75`).
+- `diskwatcher status` now returns volume usage metadata in both text and JSON modes so operators immediately see capacity snapshots (`src/diskwatcher/core/cli.py:205`).
+- SQLite connections gained WAL + busy-timeouts with retry logic so heavy scans no longer explode on transient locks (`src/diskwatcher/db/connection.py:24`, `src/diskwatcher/db/events.py:20`).
 - Expanded pytest coverage to assert metadata tables stay in sync and confirmed migrations stamp the new baseline (`tests/test_db.py:86`).
 
 **Challenges.**

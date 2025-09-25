@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,8 @@ _VOLUME_USAGE_REFRESH_SECONDS = 300
 _VOLUME_USAGE_REFRESH_EVENT_THRESHOLD = 100
 _FILE_IGNORE_SUFFIXES = {".lock", ".tmp", ".swp", ".swx", "~"}
 _FILE_IGNORE_NAMES = {".DS_Store", "Thumbs.db"}
+_DB_MAX_RETRIES = 3
+_DB_RETRY_DELAY_BASE = 0.05
 
 
 def log_event(
@@ -33,7 +36,8 @@ def log_event(
         timestamp = datetime.now(timezone.utc).isoformat()
 
     with conn:
-        conn.execute(
+        _execute_with_retry(
+            conn,
             """
             INSERT INTO events (timestamp, event_type, path, directory, volume_id, process_id)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -54,6 +58,31 @@ def query_events(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str, A
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_volume_metadata(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Return raw metadata stored for each tracked volume."""
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT
+            volume_id,
+            directory,
+            event_count,
+            created_count,
+            modified_count,
+            deleted_count,
+            last_event_timestamp,
+            usage_total_bytes,
+            usage_used_bytes,
+            usage_free_bytes,
+            usage_refreshed_at
+        FROM volumes
+        ORDER BY (last_event_timestamp IS NULL), last_event_timestamp DESC, volume_id
+        """
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -138,7 +167,8 @@ def _update_volume_metadata(
     modified_delta = 1 if event_type == "modified" else 0
     deleted_delta = 1 if event_type == "deleted" else 0
 
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """
         INSERT INTO volumes (volume_id, directory)
         VALUES (?, ?)
@@ -147,7 +177,8 @@ def _update_volume_metadata(
         (volume_id, directory),
     )
 
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """
         UPDATE volumes
         SET event_count = event_count + 1,
@@ -209,7 +240,8 @@ def _maybe_refresh_volume_usage(
         )
         return
 
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """
         UPDATE volumes
         SET usage_total_bytes = ?,
@@ -240,7 +272,8 @@ def _update_file_metadata(
             return
 
     if event_type == "deleted":
-        conn.execute(
+        _execute_with_retry(
+            conn,
             """
             UPDATE files
             SET is_deleted = 1,
@@ -269,7 +302,8 @@ def _update_file_metadata(
     modified_time = datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc).isoformat()
     created_time = datetime.fromtimestamp(stat_result.st_ctime, tz=timezone.utc).isoformat()
 
-    conn.execute(
+    _execute_with_retry(
+        conn,
         """
         INSERT INTO files (
             volume_id,
@@ -312,3 +346,17 @@ def _parse_iso(raw: Optional[str]) -> datetime:
         return datetime.fromisoformat(raw)
     except ValueError:
         return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _execute_with_retry(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> None:
+    for attempt in range(_DB_MAX_RETRIES):
+        try:
+            conn.execute(sql, params)
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            if attempt == _DB_MAX_RETRIES - 1:
+                raise
+            time.sleep(_DB_RETRY_DELAY_BASE * (2 ** attempt))
