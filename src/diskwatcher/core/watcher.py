@@ -4,13 +4,14 @@ from watchdog.events import FileSystemEventHandler
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from diskwatcher.utils.logging import get_logger
 from diskwatcher.db import log_event, init_db
 
 from pathlib import Path
 
 from threading import Event, Lock
-from typing import Optional
+from typing import Any, Optional
 
 # logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = get_logger(__name__)
@@ -41,6 +42,7 @@ class DiskWatcher(FileSystemEventHandler):
         self.conn = conn
         self.conn_lock = conn_lock
         self.log_to_db = log_to_db
+        self.scan_stats: dict[str, Any] = {}
 
     def on_modified(self, event):
         logger.info(f"File modified: {event.src_path}")
@@ -116,16 +118,90 @@ class DiskWatcher(FileSystemEventHandler):
         Recursively walk each watched dir and log all files as 'existing'.
         If interruptible is True, watcher.stop_event can be set to cancel.
         """
-        # create a threading.Event on self if not already
         if not hasattr(self, "stop_event"):
             self.stop_event = threading.Event()
+
+        started_at = time.time()
+        files_scanned = 0
+        directories_seen = 0
+        self.scan_stats = {
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "files_scanned": 0,
+            "directories_seen": 0,
+        }
+
+        logger.info(
+            "initial_scan_start",
+            extra={
+                "volume_id": self.uuid,
+                "root": str(self.path),
+                "started_at": self.scan_stats["started_at"],
+            },
+        )
+
         for root, dirs, files in os.walk(self.path):
             if interruptible and self.stop_event.is_set():
-                logger.info("Archival scan interrupted.")
+                logger.info(
+                    "initial_scan_interrupted",
+                    extra={
+                        "volume_id": self.uuid,
+                        "root": str(self.path),
+                        "files_scanned": files_scanned,
+                        "directories_seen": directories_seen,
+                        "elapsed_seconds": round(time.time() - started_at, 2),
+                    },
+                )
+                self.scan_stats.update(
+                    {
+                        "status": "interrupted",
+                        "files_scanned": files_scanned,
+                        "directories_seen": directories_seen,
+                        "elapsed_seconds": round(time.time() - started_at, 2),
+                    }
+                )
                 return
+            directories_seen += 1
             for fname in files:
                 full = Path(root) / fname
                 self.log_event("existing", str(full))
+                files_scanned += 1
+                if files_scanned % 500 == 0:
+                    self.scan_stats.update(
+                        {
+                            "status": "running",
+                            "files_scanned": files_scanned,
+                            "directories_seen": directories_seen,
+                        }
+                    )
+                    logger.debug(
+                        "initial_scan_progress",
+                        extra={
+                            "volume_id": self.uuid,
+                            "files_scanned": files_scanned,
+                            "directories_seen": directories_seen,
+                        },
+                    )
+
+        elapsed = time.time() - started_at
+        logger.info(
+            "initial_scan_complete",
+            extra={
+                "volume_id": self.uuid,
+                "root": str(self.path),
+                "files_scanned": files_scanned,
+                "directories_seen": directories_seen,
+                "elapsed_seconds": round(elapsed, 2),
+            },
+        )
+
+        self.scan_stats = {
+            "status": "complete",
+            "files_scanned": files_scanned,
+            "directories_seen": directories_seen,
+            "elapsed_seconds": elapsed,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 # class DiskWatcherThread(threading.Thread):

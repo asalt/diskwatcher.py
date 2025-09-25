@@ -32,6 +32,8 @@ diskwatcher run /mnt/e /media/alex --log-level info
 - If no directories are provided the CLI will try to auto-detect removable media.
 - Control the initial archival sweep with `--scan/--no-scan` or set
   `diskwatcher config set run.auto_scan false` to disable it by default.
+- The archival sweep logs structured progress every few hundred files so you can
+  monitor long-running scans in `~/.diskwatcher/diskwatcher.log`.
 
 ### Inspect status
 

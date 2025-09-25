@@ -179,6 +179,67 @@ def test_archive_existing_files_logs_existing_event(tmp_path, temp_db):
     assert any(event["event_type"] == "existing" for event in events)
 
 
+def test_archive_existing_files_updates_scan_stats(tmp_path, temp_db):
+    watched_dir = tmp_path / "watched"
+    nested = watched_dir / "nested"
+    nested.mkdir(parents=True)
+    for idx in range(3):
+        (watched_dir / f"file_{idx}.txt").write_text("content")
+    (nested / "inner.txt").write_text("inner")
+
+    watcher = DiskWatcher(str(watched_dir), conn=temp_db)
+    watcher.archive_existing_files()
+
+    stats = watcher.scan_stats
+    assert stats["status"] == "complete"
+    assert stats["files_scanned"] >= 4
+    assert stats["directories_seen"] >= 2
+    assert stats["elapsed_seconds"] >= 0
+
+
+def test_archive_existing_files_resets_stats_on_rerun(tmp_path, temp_db):
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+    (watched_dir / "a.txt").write_text("a")
+
+    watcher = DiskWatcher(str(watched_dir), conn=temp_db)
+    watcher.archive_existing_files()
+    first_stats = watcher.scan_stats.copy()
+
+    (watched_dir / "b.txt").write_text("b")
+    watcher.archive_existing_files()
+    second_stats = watcher.scan_stats
+
+    assert second_stats["status"] == "complete"
+    assert second_stats["files_scanned"] >= first_stats["files_scanned"]
+    assert second_stats["completed_at"] != first_stats.get("completed_at")
+
+
+def test_manager_status_reflects_scan_stats(tmp_path, monkeypatch):
+    db_root = tmp_path / ".diskwatcher"
+    monkeypatch.setattr(db_connection, "DB_DIR", db_root, raising=False)
+    monkeypatch.setattr(db_connection, "DB_PATH", db_root / "diskwatcher.db", raising=False)
+    monkeypatch.setattr(
+        "diskwatcher.core.manager.get_mount_info",
+        lambda path: {"uuid": "test-vol", "label": "", "device": str(path)},
+        raising=False,
+    )
+
+    manager = DiskWatcherManager()
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+    (watched_dir / "existing.txt").write_text("content")
+
+    manager.add_directory(watched_dir, uuid="test-vol")
+    initial_status = manager.status()
+    assert initial_status[0]["scan"]["status"] == "pending"
+
+    manager.threads[0].watcher.archive_existing_files()
+
+    updated_status = manager.status()
+    scan_info = updated_status[0]["scan"]
+    assert scan_info["status"] == "complete"
+    assert scan_info["files_scanned"] >= 1
 def test_manager_reuses_single_connection(tmp_path, monkeypatch):
     db_root = tmp_path / ".diskwatcher"
     monkeypatch.setattr(db_connection, "DB_DIR", db_root, raising=False)

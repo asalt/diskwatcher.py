@@ -3,7 +3,7 @@ date: 2025-09-25T19:05:49Z
 task: "Track volume and file metadata"
 branch: "main"
 agent: "gpt-5-codex"
-commit: "N/A"
+commit: "8d994da"
 tags: [feature, db]
 ---
 
@@ -15,6 +15,8 @@ tags: [feature, db]
 - CLI `config show` surfaces storage paths so operators know where the DB/logs/config live, and README documents the storage layout (`src/diskwatcher/core/cli.py:182`, `README.md:75`).
 - `diskwatcher status` now returns volume usage metadata in both text and JSON modes so operators immediately see capacity snapshots (`src/diskwatcher/core/cli.py:205`).
 - SQLite connections gained WAL + busy-timeouts with retry logic so heavy scans no longer explode on transient locks (`src/diskwatcher/db/connection.py:24`, `src/diskwatcher/db/events.py:20`).
+- Initial archival scans emit structured progress logs and retain stats so operators can track long sweeps (`src/diskwatcher/core/watcher.py:54`).
+- Added regression tests that cover scan stats and manager status reporting (`tests/test_diskwatcher.py:178`).
 - Expanded pytest coverage to assert metadata tables stay in sync and confirmed migrations stamp the new baseline (`tests/test_db.py:86`).
 
 **Challenges.**

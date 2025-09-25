@@ -53,7 +53,17 @@ class DiskWatcherManager:
 
     def status(self) -> List[dict]:
         """Return current status of each thread."""
-        return [
-            {"path": str(t.path), "uuid": t.uuid, "alive": t.is_alive()}
-            for t in self.threads
-        ]
+        statuses = []
+        for thread in self.threads:
+            scan_stats = getattr(thread.watcher, "scan_stats", {})
+            entry = {
+                "path": str(thread.path),
+                "uuid": thread.uuid,
+                "alive": thread.is_alive(),
+            }
+            if scan_stats:
+                entry["scan"] = scan_stats
+            else:
+                entry["scan"] = {"status": "pending"}
+            statuses.append(entry)
+        return statuses
