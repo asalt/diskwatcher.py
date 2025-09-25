@@ -2,11 +2,13 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+
+from diskwatcher.utils import config as config_utils
 from diskwatcher.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-DB_PATH = Path.home() / ".diskwatcher" / "diskwatcher.db"
+DB_PATH = config_utils.config_dir() / "diskwatcher.db"
 
 
 def init_db(path=None):

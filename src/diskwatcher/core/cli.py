@@ -254,9 +254,8 @@ def config_path_cmd() -> None:
 @app.command()
 def log() -> None:
     """Show recent log entries"""
-    log_file = Path.home() / ".diskwatcher/diskwatcher.log"
-    if log_file.exists():
-        typer.echo(log_file.read_text())
+    if LOG_FILE.exists():
+        typer.echo(LOG_FILE.read_text())
     else:
         typer.echo("No logs found.")
 

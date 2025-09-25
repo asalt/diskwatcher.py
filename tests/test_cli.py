@@ -103,6 +103,13 @@ def test_config_set_rejects_unknown_keys(tmp_path):
     assert "Unknown config key" in result.stderr
 
 
+def test_config_show_text_includes_paths(tmp_path):
+    result = _run_cli(["config", "show"], home=tmp_path)
+    assert result.returncode == 0
+    assert "Storage paths:" in result.stdout
+    assert "database file" in result.stdout
+
+
 def test_status_shows_recent_events(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
 

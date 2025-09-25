@@ -1,6 +1,21 @@
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+"""Database helpers for catalog events and derived metadata."""
+
+from __future__ import annotations
+
+import logging
+import shutil
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
+
+_VOLUME_USAGE_REFRESH_SECONDS = 300
+_VOLUME_USAGE_REFRESH_EVENT_THRESHOLD = 100
+_FILE_IGNORE_SUFFIXES = {".lock", ".tmp", ".swp", ".swx", "~"}
+_FILE_IGNORE_NAMES = {".DS_Store", "Thumbs.db"}
 
 
 def log_event(
@@ -11,7 +26,9 @@ def log_event(
     volume_id: str,
     process_id: Optional[str] = None,
     timestamp: Optional[str] = None,
-):
+) -> None:
+    """Persist an event and refresh derived metadata."""
+
     if timestamp is None:
         timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -23,6 +40,14 @@ def log_event(
             """,
             (timestamp, event_type, path, directory, volume_id, process_id),
         )
+        try:
+            _update_volume_metadata(conn, volume_id, directory, event_type, timestamp)
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("Failed to update volume metadata", extra={"volume_id": volume_id})
+        try:
+            _update_file_metadata(conn, event_type, path, directory, volume_id, timestamp)
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("Failed to update file metadata", extra={"path": path})
 
 
 def query_events(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str, Any]]:
@@ -100,3 +125,190 @@ def query_events_since(
         (last_rowid, limit),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _update_volume_metadata(
+    conn: sqlite3.Connection,
+    volume_id: str,
+    directory: str,
+    event_type: str,
+    event_timestamp: str,
+) -> None:
+    created_delta = 1 if event_type == "created" else 0
+    modified_delta = 1 if event_type == "modified" else 0
+    deleted_delta = 1 if event_type == "deleted" else 0
+
+    conn.execute(
+        """
+        INSERT INTO volumes (volume_id, directory)
+        VALUES (?, ?)
+        ON CONFLICT(volume_id) DO UPDATE SET directory = excluded.directory
+        """,
+        (volume_id, directory),
+    )
+
+    conn.execute(
+        """
+        UPDATE volumes
+        SET event_count = event_count + 1,
+            created_count = created_count + ?,
+            modified_count = modified_count + ?,
+            deleted_count = deleted_count + ?,
+            last_event_timestamp = ?,
+            events_since_refresh = events_since_refresh + 1
+        WHERE volume_id = ?
+        """,
+        (created_delta, modified_delta, deleted_delta, event_timestamp, volume_id),
+    )
+
+    _maybe_refresh_volume_usage(conn, volume_id, directory, event_timestamp)
+
+
+def _maybe_refresh_volume_usage(
+    conn: sqlite3.Connection,
+    volume_id: str,
+    directory: str,
+    event_timestamp: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT usage_refreshed_at, events_since_refresh
+        FROM volumes
+        WHERE volume_id = ?
+        """,
+        (volume_id,),
+    ).fetchone()
+
+    if row is None:
+        return
+
+    usage_refreshed_at, events_since_refresh = row
+
+    should_refresh = False
+    event_dt = _parse_iso(event_timestamp)
+
+    if usage_refreshed_at is None:
+        should_refresh = True
+    else:
+        last_refresh = _parse_iso(usage_refreshed_at)
+        if (event_dt - last_refresh).total_seconds() >= _VOLUME_USAGE_REFRESH_SECONDS:
+            should_refresh = True
+
+    if events_since_refresh >= _VOLUME_USAGE_REFRESH_EVENT_THRESHOLD:
+        should_refresh = True
+
+    if not should_refresh:
+        return
+
+    try:
+        usage = shutil.disk_usage(directory)
+    except Exception:
+        logger.debug(
+            "Unable to collect disk usage for directory",
+            extra={"directory": directory, "volume_id": volume_id},
+        )
+        return
+
+    conn.execute(
+        """
+        UPDATE volumes
+        SET usage_total_bytes = ?,
+            usage_used_bytes = ?,
+            usage_free_bytes = ?,
+            usage_refreshed_at = ?,
+            events_since_refresh = 0
+        WHERE volume_id = ?
+        """,
+        (usage.total, usage.used, usage.free, event_timestamp, volume_id),
+    )
+
+
+def _update_file_metadata(
+    conn: sqlite3.Connection,
+    event_type: str,
+    path: str,
+    directory: str,
+    volume_id: str,
+    event_timestamp: str,
+) -> None:
+    path_obj = Path(path)
+    name = path_obj.name
+    if name in _FILE_IGNORE_NAMES:
+        return
+    for suffix in _FILE_IGNORE_SUFFIXES:
+        if name.endswith(suffix):
+            return
+
+    if event_type == "deleted":
+        conn.execute(
+            """
+            UPDATE files
+            SET is_deleted = 1,
+                size_bytes = NULL,
+                modified_time = NULL,
+                last_event_timestamp = ?,
+                last_event_type = ?
+            WHERE volume_id = ? AND path = ?
+            """,
+            (event_timestamp, event_type, volume_id, str(path_obj)),
+        )
+        return
+
+    try:
+        stat_result = path_obj.stat()
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("stat() failed for path", extra={"path": path, "error": str(exc)})
+        return
+
+    if not path_obj.is_file():
+        return
+
+    size_bytes = stat_result.st_size
+    modified_time = datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc).isoformat()
+    created_time = datetime.fromtimestamp(stat_result.st_ctime, tz=timezone.utc).isoformat()
+
+    conn.execute(
+        """
+        INSERT INTO files (
+            volume_id,
+            path,
+            directory,
+            size_bytes,
+            modified_time,
+            created_time,
+            last_event_timestamp,
+            last_event_type,
+            is_deleted
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ON CONFLICT(volume_id, path) DO UPDATE SET
+            directory = excluded.directory,
+            size_bytes = excluded.size_bytes,
+            modified_time = excluded.modified_time,
+            created_time = COALESCE(files.created_time, excluded.created_time),
+            last_event_timestamp = excluded.last_event_timestamp,
+            last_event_type = excluded.last_event_type,
+            is_deleted = 0
+        """,
+        (
+            volume_id,
+            str(path_obj),
+            directory,
+            size_bytes,
+            modified_time,
+            created_time,
+            event_timestamp,
+            event_type,
+        ),
+    )
+
+
+def _parse_iso(raw: Optional[str]) -> datetime:
+    if raw is None:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)

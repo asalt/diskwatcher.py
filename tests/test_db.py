@@ -79,12 +79,99 @@ def test_summarize_by_volume(db_conn):
     assert row["deleted"] == 1
 
 
+def test_volume_metadata_updates(db_conn, tmp_path):
+    target_dir = tmp_path / "vol"
+    target_dir.mkdir()
+    file_path = target_dir / "sample.txt"
+    file_path.write_text("hello")
+
+    log_event(
+        db_conn,
+        event_type="created",
+        path=str(file_path),
+        directory=str(target_dir),
+        volume_id="vol-meta",
+        timestamp="2025-01-01T00:00:00Z",
+    )
+
+    row = db_conn.execute(
+        "SELECT event_count, created_count, usage_total_bytes, usage_refreshed_at FROM volumes WHERE volume_id = ?",
+        ("vol-meta",),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 1
+    assert row[1] == 1
+    assert row[2] is not None
+    assert row[3] == "2025-01-01T00:00:00Z"
+
+
+def test_file_metadata_tracks_latest_state(db_conn, tmp_path):
+    target_dir = tmp_path / "files"
+    target_dir.mkdir()
+    file_path = target_dir / "document.txt"
+    file_path.write_text("revision 1")
+
+    timestamp = "2025-01-03T12:00:00Z"
+    log_event(
+        db_conn,
+        event_type="created",
+        path=str(file_path),
+        directory=str(target_dir),
+        volume_id="vol-files",
+        timestamp=timestamp,
+    )
+
+    meta = db_conn.execute(
+        "SELECT size_bytes, is_deleted, last_event_type FROM files WHERE volume_id = ? AND path = ?",
+        ("vol-files", str(file_path)),
+    ).fetchone()
+    assert meta is not None
+    assert meta[0] == len("revision 1")
+    assert meta[1] == 0
+    assert meta[2] == "created"
+
+    file_path.write_text("revision 2")
+    log_event(
+        db_conn,
+        event_type="modified",
+        path=str(file_path),
+        directory=str(target_dir),
+        volume_id="vol-files",
+        timestamp="2025-01-03T12:05:00Z",
+    )
+
+    meta = db_conn.execute(
+        "SELECT size_bytes, last_event_type, is_deleted FROM files WHERE volume_id = ? AND path = ?",
+        ("vol-files", str(file_path)),
+    ).fetchone()
+    assert meta[0] == len("revision 2")
+    assert meta[1] == "modified"
+    assert meta[2] == 0
+
+    log_event(
+        db_conn,
+        event_type="deleted",
+        path=str(file_path),
+        directory=str(target_dir),
+        volume_id="vol-files",
+        timestamp="2025-01-03T12:10:00Z",
+    )
+
+    meta = db_conn.execute(
+        "SELECT size_bytes, last_event_type, is_deleted FROM files WHERE volume_id = ? AND path = ?",
+        ("vol-files", str(file_path)),
+    ).fetchone()
+    assert meta[0] is None
+    assert meta[1] == "deleted"
+    assert meta[2] == 1
+
+
 def test_create_schema_fallback_sets_baseline_revision():
     conn = sqlite3.connect(":memory:")
     try:
         create_schema(conn)
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
         assert version is not None
-        assert version[0] == "0001_initial_catalog"
+        assert version[0] == "0002_volume_and_file_metadata"
     finally:
         conn.close()

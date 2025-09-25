@@ -11,6 +11,7 @@ querying the data.
 - Threaded watchers with a shared SQLite connection for low-overhead writes.
 - Structured logging and JSON summaries for scripting.
 - Alembic-powered migrations to evolve the catalog schema safely.
+- Derived metadata tables track per-volume disk usage and per-file attributes for richer reporting.
 
 ## Installation
 

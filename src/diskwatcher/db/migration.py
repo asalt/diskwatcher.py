@@ -11,7 +11,7 @@ from alembic.config import Config
 from diskwatcher.db.connection import DB_PATH
 
 _DEFAULT_ALEMBIC_INI = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
-BASELINE_REVISION = "0001_initial_catalog"
+BASELINE_REVISION = "0002_volume_and_file_metadata"
 
 
 def build_alembic_config(

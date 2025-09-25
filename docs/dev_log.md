@@ -1,4 +1,34 @@
 ---
+date: 2025-09-25T19:05:49Z
+task: "Track volume and file metadata"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [feature, db]
+---
+
+**Summary.** Introduced persistent metadata tables so the catalog now remembers per-volume usage snapshots and per-file attributes alongside the raw event stream.
+
+**Highlights.**
+- Added Alembic migration + schema updates for `volumes` and `files` tables, and wired disk usage sampling with lightweight refresh heuristics (`migrations/versions/0002_volume_and_file_metadata.py`, `src/diskwatcher/db/events.py:130`).
+- File upserts now capture size/mtime while delete markers keep the row for history; volume rows cache usage totals and event counters for richer dashboards (`src/diskwatcher/db/events.py:200`).
+- CLI `config show` surfaces storage paths so operators know where the DB/logs/config live, and README documents the storage layout (`src/diskwatcher/core/cli.py:182`, `README.md:75`).
+- Expanded pytest coverage to assert metadata tables stay in sync and confirmed migrations stamp the new baseline (`tests/test_db.py:86`).
+
+**Challenges.**
+- Avoiding noisy disk-usage sampling required balancing time and event-count thresholds so watchers stay light.
+
+**Suggestions.**
+- Consider exposing a `status --json` enrichment that joins into the new tables for operators who want usage + file size telemetry directly from the CLI.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
 date: 2025-09-25T18:01:39Z
 task: "Add CLI configuration management"
 branch: "main"
