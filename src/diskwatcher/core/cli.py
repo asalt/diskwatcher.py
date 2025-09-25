@@ -4,52 +4,75 @@ import sys
 import time
 import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from urllib.parse import urlparse, unquote
 
 import typer
 
 from diskwatcher.core.manager import DiskWatcherManager
 from diskwatcher.core.inspector import suggest_directories
-from diskwatcher.utils.logging import setup_logging, get_logger
+from diskwatcher.utils import config as config_utils
+from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
 from diskwatcher.db import init_db, query_events
-from diskwatcher.db.connection import DB_PATH
+from diskwatcher.db.connection import DB_PATH, DB_DIR
 from diskwatcher.db.events import summarize_by_volume, summarize_files, query_events_since
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 
 
 _LOG_LEVEL_CHOICES = {
-    "debug": logging.DEBUG,
-    "info": logging.INFO,
-    "warning": logging.WARNING,
-    "warn": logging.WARNING,
-    "error": logging.ERROR,
-    "critical": logging.CRITICAL,
+    name: getattr(logging, name.upper()) for name in config_utils.LOG_LEVEL_VALUES
 }
+_LOG_LEVEL_CHOICES["warn"] = logging.WARNING
 
 
 app = typer.Typer(help="DiskWatcher CLI - Monitor filesystem events.", no_args_is_help=True)
+config_app = typer.Typer(help="Inspect and edit DiskWatcher configuration.")
 dev_app = typer.Typer(help="Developer tooling for migrations and catalog upkeep.")
+app.add_typer(config_app, name="config")
 app.add_typer(dev_app, name="dev")
+
+
+def _emit_config_error(error: config_utils.ConfigError) -> None:
+    typer.echo(f"Configuration error: {error}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _render_config_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _get_config_value(key: str) -> Any:
+    try:
+        return config_utils.get_value(key)
+    except config_utils.ConfigError as exc:
+        _emit_config_error(exc)
+    raise AssertionError("unreachable")
 
 
 @app.callback()
 def configure_logging(
-    log_level: str = typer.Option(
-        "info",
-        help="Logging level (debug, info, warning, error, critical; alias: warn)",
+    log_level: Optional[str] = typer.Option(
+        None,
+        help="Logging level (config key: log.level).",
+        metavar="LEVEL",
     ),
 ) -> None:
     """Configure logging before executing a sub-command."""
 
-    normalized = log_level.lower()
-    if normalized not in _LOG_LEVEL_CHOICES:
-        choices = ", ".join(sorted({k for k in _LOG_LEVEL_CHOICES if k != "warn"}))
+    configured_level = _get_config_value("log.level")
+
+    candidate = log_level.lower() if log_level else configured_level
+    candidate = "warning" if candidate == "warn" else candidate
+
+    if candidate not in _LOG_LEVEL_CHOICES:
+        choices = ", ".join(sorted(v for v in config_utils.LOG_LEVEL_VALUES))
         raise typer.BadParameter(
-            f"Unsupported log level '{log_level}'. Choose from {choices}."
+            f"Unsupported log level '{candidate}'. Choose from {choices}."
         )
 
-    setup_logging(level=_LOG_LEVEL_CHOICES[normalized])
+    setup_logging(level=_LOG_LEVEL_CHOICES[candidate])
 
 
 @app.command()
@@ -62,14 +85,18 @@ def run(
         resolve_path=True,
         help="Directories to monitor. Leave empty to auto-detect."
     ),
-    no_scan: bool = typer.Option(
-        False,
-        "--no-scan",
-        help="Skip initial archival scan of existing files.",
+    scan: Optional[bool] = typer.Option(
+        None,
+        "--scan/--no-scan",
+        help="Control the initial archival scan (config key: run.auto_scan).",
     ),
 ) -> None:
     """Start monitoring a directory (defaults to auto-detected mount points)."""
     logger = get_logger(__name__)
+
+    perform_scan = _get_config_value("run.auto_scan")
+    if scan is not None:
+        perform_scan = scan
 
     if not directories:
         suggested = suggest_directories()
@@ -84,6 +111,13 @@ def run(
     manager = DiskWatcherManager()
     for directory in directories:
         manager.add_directory(Path(directory))
+
+    if perform_scan:
+        logger.info("Performing initial archival scan of monitored directories.")
+        for thread in manager.threads:
+            thread.watcher.archive_existing_files()
+    else:
+        logger.info("Skipping initial archival scan (run.auto_scan disabled).")
 
     manager.start_all()
 
@@ -143,6 +177,78 @@ def run(
     # logger.info(f"Starting DiskWatcher on {directory}")
     # watcher = DiskWatcher(directory, uuid=uuid)
     # watcher.start()
+
+
+@config_app.command("show")
+def config_show(
+    as_json: bool = typer.Option(False, "--json", help="Emit configuration as JSON."),
+) -> None:
+    """Display the effective configuration values and their defaults."""
+
+    try:
+        data = config_utils.list_config()
+    except config_utils.ConfigError as exc:
+        _emit_config_error(exc)
+
+    storage_paths = {
+        "config_dir": str(config_utils.config_dir()),
+        "config_file": str(config_utils.config_path()),
+        "database_dir": str(DB_DIR),
+        "database_file": str(DB_PATH),
+        "log_dir": str(LOG_DIR),
+        "log_file": str(LOG_FILE),
+    }
+
+    if as_json:
+        payload = {"options": data, "paths": storage_paths}
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    for key in sorted(data):
+        info = data[key]
+        typer.echo(key)
+        typer.echo(f"  value   : {_render_config_value(info['value'])} ({info['source']})")
+        typer.echo(f"  default : {_render_config_value(info['default'])}")
+        typer.echo(f"  type    : {info['type']}")
+        if info["choices"]:
+            typer.echo(f"  choices : {', '.join(info['choices'])}")
+        typer.echo(f"  desc    : {info['description']}")
+        typer.echo("")
+
+    typer.echo("Storage paths:")
+    for label, value in storage_paths.items():
+        typer.echo(f"  {label.replace('_', ' '):<13} : {value}")
+
+
+@config_app.command("set")
+def config_set(key: str, value: str) -> None:
+    """Persist a configuration value."""
+
+    try:
+        parsed = config_utils.set_value(key, value)
+    except config_utils.ConfigError as exc:
+        _emit_config_error(exc)
+
+    typer.echo(f"{key} = {_render_config_value(parsed)}")
+
+
+@config_app.command("unset")
+def config_unset(key: str) -> None:
+    """Remove an override and fall back to the default."""
+
+    try:
+        config_utils.unset_value(key)
+    except config_utils.ConfigError as exc:
+        _emit_config_error(exc)
+
+    typer.echo(f"Reset {key} to its default value")
+
+
+@config_app.command("path")
+def config_path_cmd() -> None:
+    """Show where the configuration file lives."""
+
+    typer.echo(str(config_utils.config_path()))
 
 
 @app.command()

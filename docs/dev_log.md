@@ -1,4 +1,34 @@
 ---
+date: 2025-09-25T18:01:39Z
+task: "Add CLI configuration management"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "2f7d437"
+tags: [feature, cli, config]
+---
+
+**Summary.** Introduced a config subsystem with a `diskwatcher config` namespace so operators can inspect defaults, tweak log levels, and control the run bootstrap without cracking open JSON by hand.
+
+**Highlights.**
+- Added a typed registry that persists to `~/.diskwatcher/config.json`, supports env overrides, and normalises log levels while preserving defaults (`src/diskwatcher/utils/config.py`).
+- Hooked the Typer callback and run loop into the config values so `log.level` and `run.auto_scan` govern logging setup and the archival sweep (`src/diskwatcher/core/cli.py:36`, `src/diskwatcher/core/cli.py:62`).
+- Documented the new `config show/set/unset/path` commands and covered them with subprocess smoke tests to guarantee JSON output stays parseable (`tests/test_cli.py:60`, `README.md:75`).
+- Surfaced storage paths (config/db/log) via `config show` so operators know exactly where artifacts land (`src/diskwatcher/core/cli.py:197`).
+
+**Challenges.**
+- CLI logging spammed stdout during `config show --json`, so the tests now strip leading log lines before decoding.
+
+**Suggestions.**
+- Consider exposing directory presets (`run.directories`) next so labs can pre-wire mount targets.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
 date: 2025-09-25T17:48:19Z
 task: "Wire CLI tests into CI"
 branch: "main"

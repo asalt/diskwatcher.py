@@ -29,7 +29,8 @@ diskwatcher run /mnt/e /media/alex --log-level info
 ```
 
 - If no directories are provided the CLI will try to auto-detect removable media.
-- Pass `--no-scan` to skip the initial archival sweep of existing files.
+- Control the initial archival sweep with `--scan/--no-scan` or set
+  `diskwatcher config set run.auto_scan false` to disable it by default.
 
 ### Inspect status
 
@@ -77,6 +78,32 @@ diskwatcher migrate --revision head
   `~/.diskwatcher/diskwatcher.db`.
 - Supply `--url sqlite:////tmp/test.db` when exercising the CLI in tests or
   staging environments.
+
+### Manage configuration
+
+```bash
+diskwatcher config show
+diskwatcher config set log.level debug
+diskwatcher config unset run.auto_scan
+```
+
+- Settings live in `~/.diskwatcher/config.json` (override with
+  `$DISKWATCHER_CONFIG_DIR`).
+- `config show --json` prints effective values, defaults, and allowed choices to
+  speed up discovery of available knobs.
+- Use `config path` to reveal the backing file.
+
+### Storage layout
+
+- The catalog database defaults to `~/.diskwatcher/diskwatcher.db`; override it by
+  pointing `DISKWATCHER_CONFIG_DIR` at a different home or by running the CLI with
+  `--url` for migration/status snapshots.
+- Structured logs are written to `~/.diskwatcher/diskwatcher.log` via
+  `diskwatcher.utils.logging`.
+- CLI helpers such as `status --json` emit transient payloads to stdout, while
+  integration tests archive artifacts under `logs/artifacts/` when run with
+  `pytest --keep-artifacts` (or a custom `--artifact-dir`).
+
 
 ## Programmatic API
 

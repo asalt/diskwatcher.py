@@ -2,8 +2,10 @@ import logging
 import sys
 from pathlib import Path
 
+from diskwatcher.utils import config as config_utils
+
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
-LOG_DIR = Path.home() / ".diskwatcher"
+LOG_DIR = config_utils.config_dir()
 LOG_FILE = LOG_DIR / "diskwatcher.log"
 
 def setup_logging(level=logging.INFO):
@@ -27,4 +29,3 @@ def setup_logging(level=logging.INFO):
 def get_logger(name: str):
     """Get a logger instance."""
     return logging.getLogger(name)
-

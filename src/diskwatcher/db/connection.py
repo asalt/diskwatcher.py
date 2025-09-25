@@ -2,7 +2,9 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-DB_DIR = Path.home() / ".diskwatcher"
+from diskwatcher.utils import config as config_utils
+
+DB_DIR = config_utils.config_dir()
 DB_PATH = DB_DIR / "diskwatcher.db"
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sql" / "schema.sql"
 

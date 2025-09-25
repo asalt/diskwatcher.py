@@ -3,12 +3,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from typer.testing import CliRunner
 
 import diskwatcher.db.connection as db_connection
 from diskwatcher.core.cli import app
 from diskwatcher.db import init_db, log_event
+from diskwatcher.utils import config as config_utils
 import alembic.command
 import sqlite3
 
@@ -18,15 +20,21 @@ def _patch_db(monkeypatch, tmp_path):
     monkeypatch.setattr(db_connection, "DB_DIR", db_root, raising=False)
     monkeypatch.setattr(db_connection, "DB_PATH", db_root / "diskwatcher.db", raising=False)
     monkeypatch.setattr("diskwatcher.core.cli.setup_logging", lambda level=None: None)
+    monkeypatch.setenv(config_utils.CONFIG_ENV_VAR, str(tmp_path / ".diskwatcher_config"))
     return db_root
 
 
-def _run_cli(args, home):
+def _run_cli(args, home, *, config_dir: Optional[Path] = None, env_update: Optional[dict] = None):
     env = os.environ.copy()
-    env["HOME"] = str(home)
+    home_path = Path(home)
+    env["HOME"] = str(home_path)
     existing = env.get("PYTHONPATH")
     src_path = str((Path(__file__).resolve().parents[1] / "src").resolve())
     env["PYTHONPATH"] = f"{src_path}{os.pathsep}{existing}" if existing else src_path
+    config_base = config_dir if config_dir is not None else home_path / ".diskwatcher"
+    env[config_utils.CONFIG_ENV_VAR] = str(config_base)
+    if env_update:
+        env.update(env_update)
     return subprocess.run(
         [sys.executable, "-m", "diskwatcher.core.cli", *args],
         check=False,
@@ -34,6 +42,12 @@ def _run_cli(args, home):
         text=True,
         env=env,
     )
+
+
+def _stdout_json(output: str) -> dict:
+    start = output.find("{")
+    assert start != -1, f"No JSON payload in output: {output!r}"
+    return json.loads(output[start:])
 
 
 def test_cli_help_smoke(tmp_path):
@@ -46,6 +60,47 @@ def test_cli_log_level_validation(tmp_path):
     result = _run_cli(["--log-level", "verbose", "status"], home=tmp_path)
     assert result.returncode != 0
     assert "Unsupported log level" in result.stderr
+
+
+def test_config_show_defaults(tmp_path):
+    result = _run_cli(["config", "show", "--json"], home=tmp_path)
+    assert result.returncode == 0
+    payload = _stdout_json(result.stdout)
+    options = payload["options"]
+    paths = payload["paths"]
+    assert options["log.level"]["value"] == "info"
+    assert options["log.level"]["source"] == "default"
+    assert options["run.auto_scan"]["value"] is True
+    assert paths["database_dir"].endswith(".diskwatcher")
+    assert paths["database_file"].endswith("diskwatcher.db")
+
+
+def test_config_set_and_show(tmp_path):
+    config_dir = tmp_path / "config"
+    set_result = _run_cli(
+        ["config", "set", "log.level", "debug"],
+        home=tmp_path,
+        config_dir=config_dir,
+    )
+    assert set_result.returncode == 0
+
+    show_result = _run_cli(
+        ["config", "show", "--json"],
+        home=tmp_path,
+        config_dir=config_dir,
+    )
+    data = _stdout_json(show_result.stdout)
+    options = data["options"]
+    paths = data["paths"]
+    assert options["log.level"]["value"] == "debug"
+    assert options["log.level"]["source"] == "user"
+    assert Path(paths["config_dir"]).resolve() == config_dir.resolve()
+
+
+def test_config_set_rejects_unknown_keys(tmp_path):
+    result = _run_cli(["config", "set", "unknown.key", "value"], home=tmp_path)
+    assert result.returncode != 0
+    assert "Unknown config key" in result.stderr
 
 
 def test_status_shows_recent_events(monkeypatch, tmp_path):
