@@ -18,16 +18,38 @@ from diskwatcher.db.events import summarize_by_volume, summarize_files, query_ev
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 
 
+_LOG_LEVEL_CHOICES = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "warn": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
+
+
 app = typer.Typer(help="DiskWatcher CLI - Monitor filesystem events.", no_args_is_help=True)
 dev_app = typer.Typer(help="Developer tooling for migrations and catalog upkeep.")
 app.add_typer(dev_app, name="dev")
 
 
 @app.callback()
-def main(log_level: str = typer.Option("info", help="Logging level (debug, info, warning, error)")) -> None:
-    """Entry point for the DiskWatcher CLI."""
-    resolved_level = getattr(logging, log_level.upper(), logging.INFO)
-    setup_logging(level=resolved_level)
+def configure_logging(
+    log_level: str = typer.Option(
+        "info",
+        help="Logging level (debug, info, warning, error, critical; alias: warn)",
+    ),
+) -> None:
+    """Configure logging before executing a sub-command."""
+
+    normalized = log_level.lower()
+    if normalized not in _LOG_LEVEL_CHOICES:
+        choices = ", ".join(sorted({k for k in _LOG_LEVEL_CHOICES if k != "warn"}))
+        raise typer.BadParameter(
+            f"Unsupported log level '{log_level}'. Choose from {choices}."
+        )
+
+    setup_logging(level=_LOG_LEVEL_CHOICES[normalized])
 
 
 @app.command()
@@ -128,9 +150,9 @@ def log() -> None:
     """Show recent log entries"""
     log_file = Path.home() / ".diskwatcher/diskwatcher.log"
     if log_file.exists():
-        click.echo(log_file.read_text())
+        typer.echo(log_file.read_text())
     else:
-        click.echo("No logs found.")
+        typer.echo("No logs found.")
 
 
 @app.command()
@@ -345,11 +367,17 @@ def dev_integrity(
     typer.echo(f"Catalog integrity_check: {status}")
 
 
-def entrypoint() -> None:
-    """Console script entrypoint."""
+def main() -> None:
+    """Console script entrypoint invoked by `diskwatcher` binary."""
 
     app()
 
 
+def entrypoint() -> None:
+    """Alias for console script entrypoint (packaging compatibility)."""
+
+    main()
+
+
 if __name__ == "__main__":
-    entrypoint()
+    main()

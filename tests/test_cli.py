@@ -1,4 +1,9 @@
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 import diskwatcher.db.connection as db_connection
@@ -14,6 +19,33 @@ def _patch_db(monkeypatch, tmp_path):
     monkeypatch.setattr(db_connection, "DB_PATH", db_root / "diskwatcher.db", raising=False)
     monkeypatch.setattr("diskwatcher.core.cli.setup_logging", lambda level=None: None)
     return db_root
+
+
+def _run_cli(args, home):
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    existing = env.get("PYTHONPATH")
+    src_path = str((Path(__file__).resolve().parents[1] / "src").resolve())
+    env["PYTHONPATH"] = f"{src_path}{os.pathsep}{existing}" if existing else src_path
+    return subprocess.run(
+        [sys.executable, "-m", "diskwatcher.core.cli", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_cli_help_smoke(tmp_path):
+    result = _run_cli(["--help"], home=tmp_path)
+    assert result.returncode == 0
+    assert "DiskWatcher CLI" in result.stdout
+
+
+def test_cli_log_level_validation(tmp_path):
+    result = _run_cli(["--log-level", "verbose", "status"], home=tmp_path)
+    assert result.returncode != 0
+    assert "Unsupported log level" in result.stderr
 
 
 def test_status_shows_recent_events(monkeypatch, tmp_path):

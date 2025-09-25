@@ -1,4 +1,91 @@
 ---
+date: 2025-09-25T17:48:19Z
+task: "Wire CLI tests into CI"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "f856e24"
+tags: [ci, tests]
+---
+
+**Summary.** Hooked the new subprocess smoke tests (and the wider pytest suite) into a GitHub Actions workflow so every push and PR runs the CLI coverage we just added.
+
+**Highlights.**
+- Added a single-job CI workflow that installs the package in editable mode and executes `pytest -q`, ensuring the CLI smoke checks run by default (`.github/workflows/ci.yml:1`).
+- Kept the matrix lean (Python 3.12) to match the lab environment while leaving room to extend versions later.
+- Verified pip upgrade + editable install succeeds before pytest executes, guarding against missing dependencies during automation.
+
+**Challenges.**
+- Balancing install speed with dependency completeness required splitting `pip install -e .` and `pytest` extras so Actions stays fast but deterministic.
+
+**Suggestions.**
+- Consider expanding the matrix once we certify watcher stability on older Python versions.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
+date: 2025-09-25T17:41:52Z
+task: "Add CLI smoke tests"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "f856e24"
+tags: [tests, ci]
+---
+
+**Summary.** Added subprocess-driven smoke tests so the Typer callback wiring and console entrypoint stay healthy, and locked in validation for unsupported log-level values to mirror production usage.
+
+**Highlights.**
+- Subprocess helper forces `python -m diskwatcher.core.cli --help` through a temp HOME/PYTHONPATH without touching the operator profile (`tests/test_cli.py:17`).
+- Added failure-path coverage for bogus `--log-level` inputs so we fail fast with actionable messaging (`tests/test_cli.py:33`).
+- Re-ran the CLI test suite to ensure the new checks complement the existing runner coverage.
+
+**Challenges.**
+- Keeping environment overrides hermetic enough for subprocesses while leaving existing monkeypatched fixtures alone took a few iterations (`tests/test_cli.py:20`).
+
+**Suggestions.**
+- Wire these smoke tests into CI's default matrix so regressions surface before packaging drops.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
+date: 2025-09-25T17:35:43Z
+task: "Fix CLI log-level option regression"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "f856e24"
+tags: [bugfix, cli]
+---
+
+**Summary.** Repaired the console entrypoint so `diskwatcher --help` no longer crashes and tightened how we parse the `--log-level` option. Added friendly validation plus a legacy alias so existing scripts keep working while the new packaging target stays consistent.
+
+**Highlights.**
+- Split the Typer callback into `configure_logging` and a lightweight `main` launcher to align with the generated console script.
+- Normalized log-level handling with a case-insensitive map and explicit error messaging (`src/diskwatcher/core/cli.py:21`).
+- Swapped residual `click.echo` usage for `typer.echo` to avoid missing imports in the log command.
+
+**Challenges.**
+- Confirmed the editable install still pointed at the older console stub, so I kept `main()` as a backward-compatible alias (`src/diskwatcher/core/cli.py:370`).
+
+**Suggestions.**
+- Consider adding a lightweight CLI smoke test in CI to catch entrypoint regressions before release.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
 date: 2025-09-17T22:32:27Z
 task: "Review dashboard and stream rollout"
 branch: "main"
