@@ -6,6 +6,37 @@ from typing import Dict, Optional
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+LSBLK_FIELDS: tuple[str, ...] = (
+    "NAME",
+    "PATH",
+    "MOUNTPOINT",
+    "MAJ:MIN",
+    "UUID",
+    "LABEL",
+    "PTUUID",
+    "PTTYPE",
+    "PARTTYPENAME",
+    "PARTTYPE",
+    "PARTUUID",
+    "SIZE",
+    "MODEL",
+    "SERIAL",
+    "VENDOR",
+    "FSVER",
+    "WWN",
+)
+
+IDENTIFIER_COMPONENTS: tuple[str, ...] = (
+    "UUID",
+    "PARTUUID",
+    "PTUUID",
+    "WWN",
+    "SERIAL",
+    "MODEL",
+    "VENDOR",
+    "FSVER",
+)
+
 
 def parse_lsblk_line(line: str) -> dict:
     """Parse a single line of lsblk -P output into a dictionary."""
@@ -36,13 +67,40 @@ def _run_command(args: list[str]) -> str:
 def _fallback_mount_info(directory: Path) -> Dict[str, Optional[str]]:
     resolved = directory.resolve()
     anchor = resolved.anchor or str(resolved.root)
+    fallback_device = anchor or str(resolved)
     return {
         "directory": str(resolved),
         "mount_point": anchor or str(resolved),
-        "device": anchor or str(resolved),
+        "device": fallback_device,
+        "volume_id": fallback_device,
         "uuid": None,
         "label": None,
+        "lsblk": None,
     }
+
+
+def _build_volume_identifier(fields: Dict[str, Optional[str]], fallback: str) -> str:
+    """Coalesce a stable identifier from lsblk metadata."""
+
+    components = []
+    for key in IDENTIFIER_COMPONENTS:
+        value = fields.get(key)
+        if value:
+            components.append(f"{key.lower()}={value}")
+
+    if components:
+        return "|".join(components)
+
+    for key in ("PATH", "NAME"):
+        value = fields.get(key)
+        if value:
+            return value
+
+    maj_min = fields.get("MAJ:MIN")
+    if maj_min:
+        return f"maj:min={maj_min}"
+
+    return fallback
 
 
 def get_mount_info(directory: str) -> dict:
@@ -69,14 +127,24 @@ def get_mount_info(directory: str) -> dict:
     device_name = Path(device).name
     uuid = None
     label = None
+    volume_id = None
+    lsblk_details: Optional[Dict[str, Optional[str]]] = None
 
     try:
-        lsblk_output = _run_command(["lsblk", "-P", "-o", "NAME,UUID,LABEL"])
+        lsblk_output = _run_command(["lsblk", "-P", "-o", ",".join(LSBLK_FIELDS)])
+
         for line in lsblk_output.splitlines():
-            fields = parse_lsblk_line(line)
-            if fields.get("NAME") == device_name:
+            parsed = parse_lsblk_line(line)
+            fields = {
+                k: (v.strip() if v and v.strip() else None) for k, v in parsed.items()
+            }
+            name = fields.get("NAME")
+            path_or_device = fields.get("PATH")
+            if name == device_name or path_or_device == device:
                 uuid = fields.get("UUID")
                 label = fields.get("LABEL")
+                volume_id = _build_volume_identifier(fields, device)
+                lsblk_details = fields
                 break
     except RuntimeError:
         pass
@@ -85,6 +153,8 @@ def get_mount_info(directory: str) -> dict:
         "directory": str(path),
         "mount_point": mount_point or str(path),
         "device": device or str(path),
+        "volume_id": volume_id or uuid or label or device or str(path),
         "uuid": uuid or None,
         "label": label or None,
+        "lsblk": lsblk_details,
     }

@@ -24,6 +24,36 @@ def _patch_db(monkeypatch, tmp_path):
     return db_root
 
 
+def _mock_mount_info(volume_id: str):
+    def _info(directory):
+        directory_str = str(directory)
+        return {
+            "directory": directory_str,
+            "mount_point": directory_str,
+            "device": "/dev/mock",
+            "volume_id": volume_id,
+            "uuid": f"{volume_id}-uuid",
+            "label": f"{volume_id}-label",
+            "identity_refreshed_at": "2025-01-01T00:00:00Z",
+            "lsblk": {
+                "MODEL": "MockDrive",
+                "SERIAL": "MOCK-SERIAL",
+                "VENDOR": "MockVendor",
+                "SIZE": "1T",
+                "PTTYPE": "gpt",
+                "PTUUID": "mock-ptuuid",
+                "PARTTYPE": "mock-parttype",
+                "PARTUUID": "mock-partuuid",
+                "PARTTYPENAME": "Mock partition",
+                "WWN": "mock-wwn",
+                "FSVER": "1.0",
+                "MAJ:MIN": "8:18",
+            },
+        }
+
+    return _info
+
+
 def _run_cli(args, home, *, config_dir: Optional[Path] = None, env_update: Optional[dict] = None):
     env = os.environ.copy()
     home_path = Path(home)
@@ -112,8 +142,15 @@ def test_config_show_text_includes_paths(tmp_path):
 
 def test_status_shows_recent_events(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
+    mount_factory = _mock_mount_info("vol-1")
+    monkeypatch.setattr(
+        "diskwatcher.core.cli.get_mount_info",
+        mount_factory,
+        raising=False,
+    )
 
     with init_db() as conn:
+        mount_metadata = mount_factory(str(tmp_path))
         log_event(
             conn,
             event_type="created",
@@ -121,8 +158,10 @@ def test_status_shows_recent_events(monkeypatch, tmp_path):
             directory=str(tmp_path),
             volume_id="vol-1",
             process_id="pid",
+            mount_metadata=mount_metadata,
         )
 
+        mount_metadata = mount_factory(str(tmp_path))
         log_event(
             conn,
             event_type="deleted",
@@ -130,6 +169,7 @@ def test_status_shows_recent_events(monkeypatch, tmp_path):
             directory=str(tmp_path),
             volume_id="vol-1",
             process_id="pid",
+            mount_metadata=mount_metadata,
         )
 
     runner = CliRunner()
@@ -141,6 +181,10 @@ def test_status_shows_recent_events(monkeypatch, tmp_path):
     assert "By volume:" in result.output
     assert "total=2" in result.output
     assert "Volume metadata:" in result.output
+    assert "model=MockDrive" in result.output
+    assert "serial=MOCK-SERIAL" in result.output
+    assert "identity: refreshed=" in result.output
+    assert "source=stored" in result.output
 
 
 def test_status_handles_empty_catalog(monkeypatch, tmp_path):
@@ -155,8 +199,15 @@ def test_status_handles_empty_catalog(monkeypatch, tmp_path):
 
 def test_status_json_output(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
+    mount_factory = _mock_mount_info("vol-json")
+    monkeypatch.setattr(
+        "diskwatcher.core.cli.get_mount_info",
+        mount_factory,
+        raising=False,
+    )
 
     with init_db() as conn:
+        mount_metadata = mount_factory(str(tmp_path))
         log_event(
             conn,
             event_type="modified",
@@ -164,6 +215,7 @@ def test_status_json_output(monkeypatch, tmp_path):
             directory=str(tmp_path),
             volume_id="vol-json",
             process_id="pid",
+            mount_metadata=mount_metadata,
         )
 
     runner = CliRunner()
@@ -178,6 +230,10 @@ def test_status_json_output(monkeypatch, tmp_path):
     assert target is not None
     assert target["usage_total_bytes"] is not None
     assert target["event_count"] >= 1
+    assert target["mount_metadata"]["lsblk"]["MODEL"] == "MockDrive"
+    assert target["mount_metadata"]["uuid"] == "vol-json-uuid"
+    assert target["mount_metadata"]["identity_refreshed_at"]
+    assert target["mount_metadata"]["source"] == "stored"
 
 
 def test_dashboard_lists_recent_files(monkeypatch, tmp_path):

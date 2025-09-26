@@ -1,8 +1,9 @@
+import json
 import pytest
 import sqlite3
 from datetime import datetime
 from diskwatcher.db import create_schema, log_event, query_events
-from diskwatcher.db.events import summarize_by_volume
+from diskwatcher.db.events import fetch_volume_metadata, summarize_by_volume
 
 
 @pytest.fixture
@@ -77,6 +78,49 @@ def test_summarize_by_volume(db_conn):
     assert row["total_events"] == 2
     assert row["created"] == 1
     assert row["deleted"] == 1
+
+
+def test_volume_identity_persisted(db_conn):
+    mount_metadata = {
+        "device": "/dev/mock",
+        "mount_point": "/tmp",
+        "uuid": "uuid-123",
+        "label": "MockLabel",
+        "identity_refreshed_at": "2025-01-01T00:00:00Z",
+        "lsblk": {
+            "MODEL": "MockDrive",
+            "SERIAL": "SER123",
+            "VENDOR": "MockVendor",
+            "SIZE": "1T",
+            "PTUUID": "pt-uuid",
+            "PTTYPE": "gpt",
+        },
+    }
+
+    log_event(
+        db_conn,
+        event_type="created",
+        path="/tmp/identity.txt",
+        directory="/tmp",
+        volume_id="vol-ident",
+        process_id="pid",
+        timestamp="2025-01-01T00:00:00Z",
+        mount_metadata=mount_metadata,
+    )
+
+    volumes = fetch_volume_metadata(db_conn)
+    assert len(volumes) == 1
+    row = volumes[0]
+    assert row["mount_device"] == "/dev/mock"
+    assert row["mount_point"] == "/tmp"
+    assert row["mount_uuid"] == "uuid-123"
+    assert row["mount_label"] == "MockLabel"
+    assert row["identity_refreshed_at"] == "2025-01-01T00:00:00Z"
+    assert row["lsblk_model"] == "MockDrive"
+    assert row["lsblk_serial"] == "SER123"
+    payload = json.loads(row["lsblk_json"])
+    assert payload["MODEL"] == "MockDrive"
+    assert payload["PTUUID"] == "pt-uuid"
 
 
 def test_volume_metadata_updates(db_conn, tmp_path):

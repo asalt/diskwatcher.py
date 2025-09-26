@@ -34,7 +34,12 @@ def test_manager_records_events_and_cli_reports(monkeypatch, artifact_dir):
 
         monkeypatch.setattr(
             "diskwatcher.core.manager.get_mount_info",
-            lambda path: {"uuid": "integration-vol", "label": "", "device": str(path)},
+            lambda path: {
+                "uuid": "integration-vol",
+                "label": "",
+                "device": str(path),
+                "volume_id": "integration-vol",
+            },
             raising=False,
         )
 

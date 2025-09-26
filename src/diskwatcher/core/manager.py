@@ -22,7 +22,13 @@ class DiskWatcherManager:
         if uuid is None:
             try:
                 info = get_mount_info(path)
-                uuid = info["uuid"] or info["label"] or info["device"]
+                uuid = (
+                    info.get("volume_id")
+                    or info.get("uuid")
+                    or info.get("label")
+                    or info.get("device")
+                    or str(path)
+                )
             except Exception as e:
                 logger.warning(f"Could not resolve ID for {path}: {e}")
                 uuid = str(path)

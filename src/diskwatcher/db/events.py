@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ _DB_MAX_RETRIES = 3
 _DB_RETRY_DELAY_BASE = 0.05
 
 
+
 def log_event(
     conn: sqlite3.Connection,
     event_type: str,
@@ -29,6 +31,7 @@ def log_event(
     volume_id: str,
     process_id: Optional[str] = None,
     timestamp: Optional[str] = None,
+    mount_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist an event and refresh derived metadata."""
 
@@ -45,7 +48,14 @@ def log_event(
             (timestamp, event_type, path, directory, volume_id, process_id),
         )
         try:
-            _update_volume_metadata(conn, volume_id, directory, event_type, timestamp)
+            _update_volume_metadata(
+                conn,
+                volume_id,
+                directory,
+                event_type,
+                timestamp,
+                mount_metadata=mount_metadata,
+            )
         except Exception:  # pragma: no cover - defensive guard
             logger.exception("Failed to update volume metadata", extra={"volume_id": volume_id})
         try:
@@ -79,7 +89,28 @@ def fetch_volume_metadata(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             usage_total_bytes,
             usage_used_bytes,
             usage_free_bytes,
-            usage_refreshed_at
+            usage_refreshed_at,
+            mount_device,
+            mount_point,
+            mount_uuid,
+            mount_label,
+            mount_volume_id,
+            lsblk_name,
+            lsblk_path,
+            lsblk_model,
+            lsblk_serial,
+            lsblk_vendor,
+            lsblk_size,
+            lsblk_fsver,
+            lsblk_pttype,
+            lsblk_ptuuid,
+            lsblk_parttype,
+            lsblk_partuuid,
+            lsblk_parttypename,
+            lsblk_wwn,
+            lsblk_maj_min,
+            lsblk_json,
+            identity_refreshed_at
         FROM volumes
         ORDER BY (last_event_timestamp IS NULL), last_event_timestamp DESC, volume_id
         """
@@ -162,6 +193,7 @@ def _update_volume_metadata(
     directory: str,
     event_type: str,
     event_timestamp: str,
+    mount_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     created_delta = 1 if event_type == "created" else 0
     modified_delta = 1 if event_type == "modified" else 0
@@ -193,6 +225,14 @@ def _update_volume_metadata(
     )
 
     _maybe_refresh_volume_usage(conn, volume_id, directory, event_timestamp)
+    if mount_metadata:
+        _maybe_persist_volume_identity(
+            conn,
+            volume_id,
+            directory,
+            event_timestamp,
+            mount_metadata,
+        )
 
 
 def _maybe_refresh_volume_usage(
@@ -254,6 +294,54 @@ def _maybe_refresh_volume_usage(
         (usage.total, usage.used, usage.free, event_timestamp, volume_id),
     )
 
+
+def _maybe_persist_volume_identity(
+    conn: sqlite3.Connection,
+    volume_id: str,
+    directory: str,
+    event_timestamp: str,
+    mount_metadata: Dict[str, Any],
+) -> None:
+    updates: Dict[str, Any] = {}
+
+    device = mount_metadata.get("device")
+    mount_point = mount_metadata.get("mount_point") or directory
+    uuid = mount_metadata.get("uuid")
+    label = mount_metadata.get("label")
+    vol_hint = mount_metadata.get("volume_id")
+    lsblk_payload = mount_metadata.get("lsblk") or {}
+
+    if device:
+        updates["mount_device"] = device
+    if mount_point:
+        updates["mount_point"] = mount_point
+    if uuid:
+        updates["mount_uuid"] = uuid
+    if label:
+        updates["mount_label"] = label
+    if vol_hint and vol_hint != volume_id:
+        updates["mount_volume_id"] = vol_hint
+
+    if lsblk_payload:
+        updates["lsblk_json"] = json.dumps(lsblk_payload, sort_keys=True)
+        for key, column in _LSBLK_COLUMN_MAP.items():
+            value = lsblk_payload.get(key)
+            if value:
+                updates[column] = value
+
+    if not updates:
+        return
+
+    updates["identity_refreshed_at"] = event_timestamp
+
+    set_clause = ", ".join(f"{col} = ?" for col in updates)
+    values = list(updates.values())
+
+    _execute_with_retry(
+        conn,
+        f"UPDATE volumes SET {set_clause} WHERE volume_id = ?",
+        (*values, volume_id),
+    )
 
 def _update_file_metadata(
     conn: sqlite3.Connection,
@@ -360,3 +448,19 @@ def _execute_with_retry(conn: sqlite3.Connection, sql: str, params: tuple[Any, .
             if attempt == _DB_MAX_RETRIES - 1:
                 raise
             time.sleep(_DB_RETRY_DELAY_BASE * (2 ** attempt))
+_LSBLK_COLUMN_MAP: Dict[str, str] = {
+    "NAME": "lsblk_name",
+    "PATH": "lsblk_path",
+    "MODEL": "lsblk_model",
+    "SERIAL": "lsblk_serial",
+    "VENDOR": "lsblk_vendor",
+    "SIZE": "lsblk_size",
+    "FSVER": "lsblk_fsver",
+    "PTTYPE": "lsblk_pttype",
+    "PTUUID": "lsblk_ptuuid",
+    "PARTTYPE": "lsblk_parttype",
+    "PARTUUID": "lsblk_partuuid",
+    "PARTTYPENAME": "lsblk_parttypename",
+    "WWN": "lsblk_wwn",
+    "MAJ:MIN": "lsblk_maj_min",
+}

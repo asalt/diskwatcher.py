@@ -5,16 +5,18 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from diskwatcher.utils.logging import get_logger
-from diskwatcher.db import log_event, init_db
-
 from pathlib import Path
-
 from threading import Event, Lock
 from typing import Any, Optional
 
+from diskwatcher.db import init_db, log_event
+from diskwatcher.utils.devices import get_mount_info
+from diskwatcher.utils.logging import get_logger
+
 # logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = get_logger(__name__)
+
+MOUNT_METADATA_REFRESH_SECONDS = 300
 
 
 class DiskWatcher(FileSystemEventHandler):
@@ -29,20 +31,24 @@ class DiskWatcher(FileSystemEventHandler):
         log_to_db: bool = True,
     ):
         self.path = Path(path)
-        if uuid is None:
-            from diskwatcher.utils.devices import get_mount_info
-
-            possible_uuid = get_mount_info(path)
-            uuid = (
-                possible_uuid["uuid"]
-                or possible_uuid["label"]
-                or possible_uuid["device"]
-            )
-        self.uuid = uuid
         self.conn = conn
         self.conn_lock = conn_lock
         self.log_to_db = log_to_db
         self.scan_stats: dict[str, Any] = {}
+
+        self.uuid = uuid or str(self.path)
+        self._mount_metadata: Optional[dict[str, Any]] = None
+        self._mount_metadata_refreshed_at: float = 0.0
+
+        initial_metadata = self._refresh_mount_metadata(force=True)
+        if uuid is None and initial_metadata:
+            self.uuid = (
+                initial_metadata.get("volume_id")
+                or initial_metadata.get("uuid")
+                or initial_metadata.get("label")
+                or initial_metadata.get("device")
+                or str(self.path)
+            )
 
     def on_modified(self, event):
         logger.info(f"File modified: {event.src_path}")
@@ -60,8 +66,10 @@ class DiskWatcher(FileSystemEventHandler):
             self.log_event("deleted", event.src_path)
 
     def log_event(self, event_type: str, path: str):
+        mount_metadata = self._refresh_mount_metadata()
+        metadata_payload = dict(mount_metadata) if mount_metadata else None
         if self.conn:
-            logger.debug("Logging event to shared connection", extra={"uuid": self.uuid})
+            logger.debug("Logging event to shared connection", extra={"volume_id": self.uuid})
             if self.conn_lock:
                 with self.conn_lock:
                     log_event(
@@ -71,6 +79,7 @@ class DiskWatcher(FileSystemEventHandler):
                         str(self.path),
                         self.uuid,
                         str(os.getpid()),
+                        mount_metadata=metadata_payload,
                     )
             else:
                 log_event(
@@ -80,6 +89,7 @@ class DiskWatcher(FileSystemEventHandler):
                     str(self.path),
                     self.uuid,
                     str(os.getpid()),
+                    mount_metadata=metadata_payload,
                 )
         else:
             logger.info(f"Logging event to new connection")
@@ -91,6 +101,7 @@ class DiskWatcher(FileSystemEventHandler):
                     str(self.path),
                     self.uuid,
                     str(os.getpid()),
+                    mount_metadata=metadata_payload,
                 )
 
     def start(self, recursive=True, run_once=False, stop_event: Optional[Event] = None):
@@ -112,6 +123,35 @@ class DiskWatcher(FileSystemEventHandler):
         finally:
             observer.stop()
             observer.join()
+
+    def _refresh_mount_metadata(self, force: bool = False) -> Optional[dict[str, Any]]:
+        now = time.monotonic()
+        if (
+            not force
+            and self._mount_metadata is not None
+            and (now - self._mount_metadata_refreshed_at) < MOUNT_METADATA_REFRESH_SECONDS
+        ):
+            return self._mount_metadata
+
+        try:
+            info = get_mount_info(str(self.path))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(
+                "mount_metadata_refresh_failed",
+                extra={"path": str(self.path), "error": str(exc)},
+            )
+            return self._mount_metadata
+
+        if not isinstance(info, dict):  # pragma: no cover - defensive guard
+            return self._mount_metadata
+
+        metadata = dict(info)
+        metadata.setdefault("mount_point", metadata.get("mount_point") or str(self.path))
+        metadata.setdefault("identity_refreshed_at", datetime.now(timezone.utc).isoformat())
+
+        self._mount_metadata = metadata
+        self._mount_metadata_refreshed_at = now
+        return self._mount_metadata
 
     def archive_existing_files(self, interruptible: bool = False):
         """
@@ -243,6 +283,7 @@ class DiskWatcherThread(threading.Thread):
             conn=self.conn,  # ⬅️ Pass shared connection
             conn_lock=self.conn_lock,
         )
+        self.uuid = self.watcher.uuid
 
     def run(self):
         try:

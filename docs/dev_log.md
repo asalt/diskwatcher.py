@@ -1,4 +1,111 @@
 ---
+date: 2025-09-25T22:55:12Z
+task: "Persist lsblk identity snapshots"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [feature, db, cli]
+---
+
+**Summary.** Added durable storage for mount identity snapshots so every
+`volumes` row now carries the device path, UUID/label, and full `lsblk` payload
+that produced the composite `volume_id`, making hardware fingerprints available
+even when media is offline.
+
+**Highlights.**
+- Extended the SQLite schema and migrations with `mount_*`/`lsblk_*` columns plus
+  a raw `lsblk_json` blob and stitched the metadata into CLI `status --json`
+  responses (`src/diskwatcher/sql/schema.sql`, `src/diskwatcher/core/cli.py:279`).
+- Updated `DiskWatcher` to periodically snapshot `get_mount_info()` and feed the
+  payload through `log_event`, ensuring every event refreshes the stored
+  identifier (`src/diskwatcher/core/watcher.py:20`).
+- Hardened the db helpers/tests to serialize/deserialize the new metadata and
+  assert the CLI renders model/serial/PTUUID along with refresh timestamps
+  (`src/diskwatcher/db/events.py:20`, `tests/test_cli.py:143`, `tests/test_db.py:94`).
+
+**Challenges.**
+- Avoiding noisy writes meant tracking refresh intervals so watchdog events don't
+  hammer `lsblk` more than necessary.
+
+**Suggestions.**
+- Consider surfacing a `volumes --json --raw` flag to dump the stored
+  `lsblk_json` directly for bulk auditing.
+
+**Score.**
+Novelty: high
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
+date: 2025-09-25T22:38:22Z
+task: "Expose lsblk details in status"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [docs, cli]
+---
+
+**Summary.** Taught the CLI status view to enrich each volume with the full `lsblk`
+payload so the "Volume metadata" block now surfaces device serials, models,
+partition IDs, and filesystem signatures alongside the existing usage stats.
+
+**Highlights.**
+- Cached `get_mount_info()` lookups per directory and embedded the payload into
+  status JSON/text output, adding friendly formatting for block/layout details
+  (`src/diskwatcher/core/cli.py:290`).
+- Extended the lsblk helper to return the raw field map and documented how the
+  new data appears in the README volumes section (`src/diskwatcher/utils/devices.py:67`, `README.md:125`).
+- Patched CLI tests to assert the richer volume output and verified JSON callers
+  receive the new `mount_metadata` object (`tests/test_cli.py:114`).
+
+**Challenges.**
+- Needed to juggle mocked `Path.exists` interactions and lsblk casing so tests
+  kept passing while we stripped vendor padding.
+
+**Suggestions.**
+- Consider persisting the lsblk snapshot in the volumes table to retain
+  historical hardware info when drives are offline.
+
+**Score.**
+Novelty: medium
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
+date: 2025-09-25T22:29:51Z
+task: "Harden volume identifiers"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [bugfix, utils, docs]
+---
+
+**Summary.** Expanded the mount metadata helper so each suggestion/thread now carries a composite `volume_id` built from lsblk partition, table, and serial data, eliminating the duplicate UUID collisions I hit on cloned Seagate drives.
+
+**Highlights.**
+- Normalised lsblk parsing and generate deterministic identifiers that combine UUID/PTUUID/PARTUUID/WWN/serial details, with fallbacks for partially populated outputs (`src/diskwatcher/utils/devices.py:9`).
+- Updated manager, watcher, and inspector flows to prefer the new `volume_id` while remaining backward-compatible with existing UUID/label fallbacks (`src/diskwatcher/core/manager.py:20`, `src/diskwatcher/core/watcher.py:23`, `src/diskwatcher/core/inspector.py:31`).
+- Added regression coverage for the identifier builder and refreshed docs/tests so operators see the richer signature and CLI suggestions stay descriptive (`tests/test_devices.py:39`, `README.md:131`).
+
+**Challenges.**
+- Mocked `Path.exists` shenanigans in inspector tests surfaced after tightening identity flow, so I extended `DirectorySuggestion` equality to compare cleanly with Paths (`src/diskwatcher/core/inspector.py:15`).
+- Balancing informative identifier strings with stability required trimming padded lsblk vendor fields while avoiding over-fitting to a single enclosure.
+
+**Suggestions.**
+- Consider hashing the composite identifier for storage once operators are comfortable with the verbose signature.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
 date: 2025-09-25T19:05:49Z
 task: "Track volume and file metadata"
 branch: "main"

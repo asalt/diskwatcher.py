@@ -221,7 +221,12 @@ def test_manager_status_reflects_scan_stats(tmp_path, monkeypatch):
     monkeypatch.setattr(db_connection, "DB_PATH", db_root / "diskwatcher.db", raising=False)
     monkeypatch.setattr(
         "diskwatcher.core.manager.get_mount_info",
-        lambda path: {"uuid": "test-vol", "label": "", "device": str(path)},
+        lambda path: {
+            "uuid": "test-vol",
+            "label": "",
+            "device": str(path),
+            "volume_id": "test-vol",
+        },
         raising=False,
     )
 
@@ -247,7 +252,12 @@ def test_manager_reuses_single_connection(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "diskwatcher.core.manager.get_mount_info",
-        lambda path: {"uuid": "test-vol", "label": "", "device": str(path)},
+        lambda path: {
+            "uuid": "test-vol",
+            "label": "",
+            "device": str(path),
+            "volume_id": "test-vol",
+        },
         raising=False,
     )
 

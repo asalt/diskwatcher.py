@@ -3,6 +3,7 @@ import logging
 import sys
 import time
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, unquote
@@ -13,6 +14,7 @@ from diskwatcher.core.manager import DiskWatcherManager
 from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils import config as config_utils
 from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
+from diskwatcher.utils.devices import get_mount_info
 from diskwatcher.db import init_db, query_events
 from diskwatcher.db.connection import DB_PATH, DB_DIR
 from diskwatcher.db.events import (
@@ -28,6 +30,47 @@ _LOG_LEVEL_CHOICES = {
     name: getattr(logging, name.upper()) for name in config_utils.LOG_LEVEL_VALUES
 }
 _LOG_LEVEL_CHOICES["warn"] = logging.WARNING
+
+_VOLUME_IDENTITY_COLUMNS = (
+    "mount_device",
+    "mount_point",
+    "mount_uuid",
+    "mount_label",
+    "mount_volume_id",
+    "lsblk_name",
+    "lsblk_path",
+    "lsblk_model",
+    "lsblk_serial",
+    "lsblk_vendor",
+    "lsblk_size",
+    "lsblk_fsver",
+    "lsblk_pttype",
+    "lsblk_ptuuid",
+    "lsblk_parttype",
+    "lsblk_partuuid",
+    "lsblk_parttypename",
+    "lsblk_wwn",
+    "lsblk_maj_min",
+    "lsblk_json",
+    "identity_refreshed_at",
+)
+
+_LSBLK_COLUMN_MAP = {
+    "NAME": "lsblk_name",
+    "PATH": "lsblk_path",
+    "MODEL": "lsblk_model",
+    "SERIAL": "lsblk_serial",
+    "VENDOR": "lsblk_vendor",
+    "SIZE": "lsblk_size",
+    "FSVER": "lsblk_fsver",
+    "PTTYPE": "lsblk_pttype",
+    "PTUUID": "lsblk_ptuuid",
+    "PARTTYPE": "lsblk_parttype",
+    "PARTUUID": "lsblk_partuuid",
+    "PARTTYPENAME": "lsblk_parttypename",
+    "WWN": "lsblk_wwn",
+    "MAJ:MIN": "lsblk_maj_min",
+}
 
 
 app = typer.Typer(help="DiskWatcher CLI - Monitor filesystem events.", no_args_is_help=True)
@@ -103,19 +146,28 @@ def run(
     if scan is not None:
         perform_scan = scan
 
+    manager = DiskWatcherManager()
+
     if not directories:
-        suggested = suggest_directories()
-        if not suggested:
+        suggestions = suggest_directories()
+        if not suggestions:
             logger.error(
                 "No suitable directories found to monitor. Specify one manually."
             )
             return
-        directories = suggested
 
-    directories = [Path(d).resolve() for d in directories]
-    manager = DiskWatcherManager()
-    for directory in directories:
-        manager.add_directory(Path(directory))
+        for suggestion in suggestions:
+            logger.info(
+                "auto_detected_directory",
+                extra={
+                    "directory": str(suggestion.path),
+                    "volume_id": suggestion.volume_id,
+                },
+            )
+            manager.add_directory(suggestion.path, uuid=suggestion.volume_id)
+    else:
+        for directory in directories:
+            manager.add_directory(Path(directory).resolve())
 
     if perform_scan:
         logger.info("Performing initial archival scan of monitored directories.")
@@ -281,6 +333,7 @@ def status(
         return
 
     combined_volumes = _combine_volume_data(aggregates, volume_meta)
+    combined_volumes = _attach_mount_details(combined_volumes)
 
     if as_json:
         payload = {"events": events, "volumes": combined_volumes}
@@ -314,6 +367,66 @@ def status(
                 f"modified={meta['modified_count']} deleted={meta['deleted_count']}"
             )
             typer.echo(f"  usage  : {_format_usage_line(meta)}")
+            mount = meta.get("mount_metadata") or {}
+            mount_line = _format_details_line(
+                "  mount  : ",
+                {
+                    "device": mount.get("device"),
+                    "mount": mount.get("mount_point"),
+                },
+            )
+            ids_line = _format_details_line(
+                "  ids    : ",
+                {
+                    "volume": mount.get("volume_id")
+                    if mount.get("volume_id") and mount.get("volume_id") != meta["volume_id"]
+                    else None,
+                    "uuid": mount.get("uuid"),
+                    "label": mount.get("label"),
+                },
+            )
+            lsblk = mount.get("lsblk") or {}
+            block_line = _format_details_line(
+                "  block  : ",
+                {
+                    "model": lsblk.get("MODEL"),
+                    "serial": lsblk.get("SERIAL"),
+                    "vendor": lsblk.get("VENDOR"),
+                    "size": lsblk.get("SIZE"),
+                    "fsver": lsblk.get("FSVER"),
+                },
+            )
+            layout_line = _format_details_line(
+                "  layout : ",
+                {
+                    "pttype": lsblk.get("PTTYPE"),
+                    "ptuuid": lsblk.get("PTUUID"),
+                    "parttype": lsblk.get("PARTTYPE"),
+                    "partuuid": lsblk.get("PARTUUID"),
+                    "wwn": lsblk.get("WWN"),
+                },
+            )
+            partname_line = _format_details_line(
+                "  part   : ",
+                {"name": lsblk.get("PARTTYPENAME")},
+            )
+            identity_line = _format_details_line(
+                "  identity: ",
+                {
+                    "refreshed": mount.get("identity_refreshed_at"),
+                    "source": mount.get("source"),
+                },
+            )
+            for detail in (
+                mount_line,
+                ids_line,
+                block_line,
+                layout_line,
+                partname_line,
+                identity_line,
+            ):
+                if detail:
+                    typer.echo(detail)
 
 
 def _combine_volume_data(
@@ -348,6 +461,105 @@ def _combine_volume_data(
     return combined
 
 
+def _extract_mount_metadata(source: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    mount_device = source.get("mount_device")
+    mount_point = source.get("mount_point")
+    mount_uuid = source.get("mount_uuid")
+    mount_label = source.get("mount_label")
+    volume_id_hint = source.get("mount_volume_id")
+    identity_refreshed = source.get("identity_refreshed_at")
+
+    lsblk_payload: Optional[Dict[str, Any]] = None
+    lsblk_json_raw = source.get("lsblk_json")
+    if isinstance(lsblk_json_raw, str) and lsblk_json_raw:
+        try:
+            lsblk_payload = json.loads(lsblk_json_raw)
+        except json.JSONDecodeError:
+            lsblk_payload = None
+
+    if lsblk_payload is None:
+        lsblk_payload = {}
+        for key, column in _LSBLK_COLUMN_MAP.items():
+            value = source.get(column)
+            if value is not None:
+                lsblk_payload[key] = value
+        if not lsblk_payload:
+            lsblk_payload = None
+
+    if not any([mount_device, mount_point, mount_uuid, mount_label, volume_id_hint, lsblk_payload]):
+        return None
+
+    return {
+        "device": mount_device,
+        "mount_point": mount_point,
+        "uuid": mount_uuid,
+        "label": mount_label,
+        "volume_id": volume_id_hint,
+        "lsblk": lsblk_payload,
+        "identity_refreshed_at": identity_refreshed,
+        "source": source.get("mount_metadata_source", "stored"),
+    }
+
+
+def _attach_mount_details(volumes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not volumes:
+        return volumes
+
+    logger = get_logger(__name__)
+    cache: Dict[str, Optional[dict]] = {}
+    enriched: List[Dict[str, Any]] = []
+
+    for row in volumes:
+        directory = row.get("directory")
+        mount_info: Optional[dict] = None
+        if directory:
+            directory_str = str(directory)
+            if directory_str in cache:
+                mount_info = cache[directory_str]
+            else:
+                try:
+                    mount_info = get_mount_info(directory_str)
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.debug(
+                        "mount_info_lookup_failed",
+                        extra={"directory": directory_str, "error": str(exc)},
+                    )
+                    mount_info = None
+                cache[directory_str] = mount_info
+
+        updated = dict(row)
+        mount_info = updated.get("mount_metadata")
+        if not mount_info:
+            if directory:
+                directory_str = str(directory)
+                if directory_str in cache:
+                    mount_info = cache[directory_str]
+                else:
+                    try:
+                        mount_info = get_mount_info(directory_str)
+                        if mount_info:
+                            mount_info["source"] = "live"
+                            mount_info.setdefault(
+                                "identity_refreshed_at",
+                                datetime.now(timezone.utc).isoformat(),
+                            )
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        logger.debug(
+                            "mount_info_lookup_failed",
+                            extra={"directory": directory_str, "error": str(exc)},
+                        )
+                        mount_info = None
+                    cache[directory_str] = mount_info
+        elif directory:
+            cache[str(directory)] = mount_info
+
+        if mount_info:
+            updated["mount_metadata"] = mount_info
+        enriched.append(updated)
+
+    return enriched
+
+
 def _merge_volume_row(agg: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     row = dict(agg)
     if meta:
@@ -361,6 +573,9 @@ def _merge_volume_row(agg: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Di
         row["usage_free_bytes"] = meta.get("usage_free_bytes")
         row["usage_refreshed_at"] = meta.get("usage_refreshed_at")
         row.setdefault("last_event_timestamp", meta.get("last_event_timestamp"))
+        for column in _VOLUME_IDENTITY_COLUMNS:
+            if column in meta and meta[column] is not None:
+                row[column] = meta[column]
     else:
         row.setdefault("event_count", row.get("total_events", 0))
         row.setdefault("created_count", row.get("created", 0))
@@ -370,6 +585,12 @@ def _merge_volume_row(agg: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Di
         row.setdefault("usage_used_bytes", None)
         row.setdefault("usage_free_bytes", None)
         row.setdefault("usage_refreshed_at", None)
+
+    for column in _VOLUME_IDENTITY_COLUMNS:
+        row.setdefault(column, None)
+
+    identity_source = meta if meta else row
+    row["mount_metadata"] = _extract_mount_metadata(identity_source)
 
     row.setdefault("total_events", row.get("event_count", 0))
     row.setdefault("created", row.get("created_count", 0))
@@ -392,6 +613,13 @@ def _format_usage_line(meta: Dict[str, Any]) -> str:
         f"{_format_bytes(used)} / {_format_bytes(total)} ({percent:.1f}% used, free {_format_bytes(free)})"
         f" refreshed {refreshed}"
     )
+
+
+def _format_details_line(prefix: str, pairs: Dict[str, Optional[str]]) -> Optional[str]:
+    values = [f"{key}={value}" for key, value in pairs.items() if value]
+    if not values:
+        return None
+    return f"{prefix}{' '.join(values)}"
 
 
 def _format_bytes(value: Optional[int]) -> str:
@@ -506,8 +734,10 @@ def suggest() -> None:
         typer.echo("No suitable directories found.")
     else:
         typer.echo("Suggested directories to monitor:")
-        for d in suggested_dirs:
-            typer.echo(f"  - {d}")
+        for suggestion in suggested_dirs:
+            typer.echo(
+                f"  - {suggestion.path} (volume_id: {suggestion.volume_id})"
+            )
 
 
 @app.command()

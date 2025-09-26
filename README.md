@@ -44,6 +44,10 @@ diskwatcher status
 Outputs the latest events plus a "By volume" summary indicating total, created,
 modified, and deleted counts per directory. The view now folds in the persisted
 disk-usage snapshots so you can gauge free/used capacity per volume at a glance.
+The trailing "Volume metadata" block also lists the resolved device path plus
+`lsblk` identifiers (UUID/label, serial, model, vendor, partition table IDs, and
+filesystem version) so operators can confirm they're watching the expected disk
+even when enclosures share a UUID.
 
 Structured output is available for automation:
 
@@ -53,7 +57,9 @@ diskwatcher status --json --limit 25 | jq
 
 The JSON payload contains two keys: `events` (recent rows ordered by timestamp)
 and `volumes` (aggregated metrics plus the persisted fields from the `volumes`
-table, including usage bytes and refresh timestamps).
+table, including usage bytes and refresh timestamps). Each volume row now also
+exposes a `mount_metadata` object mirroring the `get_mount_info()` payload so
+downstream tools can read the raw `lsblk` data without shelling out.
 
 ### Browse catalog contents
 
@@ -129,15 +135,31 @@ new installations pick up schema changes automatically. In-memory connections
 ## Device Identity
 
 `diskwatcher.utils.devices.get_mount_info(path)` resolves the mount point,
-`lsblk` metadata, and UUID/label/device fallbacks. For example:
+`lsblk` metadata, and synthesises a stable `volume_id` from the most specific
+device attributes we can gather (UUID, partition table UUIDs, serials, WWN, and
+filesystem metadata). For example:
 
 ```python
 >>> get_mount_info("/mnt/e")
-{'directory': '/mnt/e', 'mount_point': '/mnt/e', 'device': '/dev/sda', 'uuid': '961727af-2c2d-4e11-8d3e-c7508a3bed73', 'label': 'e'}
+{
+    'directory': '/mnt/e',
+    'mount_point': '/mnt/e',
+    'device': '/dev/sda',
+    'volume_id': 'uuid=961727af-2c2d-4e11-8d3e-c7508a3bed73|serial=V1H06U2L|model=HGST HUS726T4TALA6L0|vendor=ATA|fsver=1.0',
+    'uuid': '961727af-2c2d-4e11-8d3e-c7508a3bed73',
+    'label': 'e',
+}
 ```
 
 On platforms lacking `findmnt`/`lsblk`, the helper falls back to best-effort
 identifiers so the catalog still records events.
+
+Whenever watchers log an event the resolved identity snapshot is persisted to
+the `volumes` table. Columns prefixed with `mount_` and `lsblk_` retain the
+device path, UUID/label, partition table IDs, model/serial/vendor strings, and
+the raw `lsblk_json` payload together with `identity_refreshed_at`. This keeps
+hardware fingerprints available in `status --json` even after removable media is
+unplugged.
 
 ## Development
 
