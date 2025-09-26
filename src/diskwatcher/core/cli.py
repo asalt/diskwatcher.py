@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sys
 import time
 import sqlite3
@@ -560,6 +561,93 @@ def _attach_mount_details(volumes: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return enriched
 
 
+def _search_files(
+    conn: sqlite3.Connection,
+    pattern: str,
+    *,
+    regex: bool,
+    case_sensitive: bool,
+    include_deleted: bool,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    clause = _build_search_clause("path", pattern, regex=regex, case_sensitive=case_sensitive, params=params)
+
+    where_parts = [clause]
+    if not include_deleted:
+        where_parts.append("is_deleted = 0")
+
+    sql = (
+        "SELECT path, volume_id, directory, last_event_timestamp, last_event_type, size_bytes, is_deleted "
+        "FROM files "
+        f"WHERE {' AND '.join(where_parts)} "
+        "ORDER BY (last_event_timestamp IS NULL), last_event_timestamp DESC, path "
+        "LIMIT ?"
+    )
+
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _search_directories(
+    conn: sqlite3.Connection,
+    pattern: str,
+    *,
+    regex: bool,
+    case_sensitive: bool,
+    include_deleted: bool,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    clause = _build_search_clause("directory", pattern, regex=regex, case_sensitive=case_sensitive, params=params)
+
+    where_parts = [clause]
+    if not include_deleted:
+        where_parts.append("is_deleted = 0")
+
+    sql = (
+        "SELECT "
+        "directory, "
+        "volume_id, "
+        "COUNT(*) AS total_files, "
+        "SUM(CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END) AS active_files, "
+        "MAX(last_event_timestamp) AS last_seen "
+        "FROM files "
+        f"WHERE {' AND '.join(where_parts)} "
+        "GROUP BY directory, volume_id "
+        "ORDER BY (last_seen IS NULL), last_seen DESC, directory "
+        "LIMIT ?"
+    )
+
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _build_search_clause(
+    column: str,
+    pattern: str,
+    *,
+    regex: bool,
+    case_sensitive: bool,
+    params: List[Any],
+) -> str:
+    if regex:
+        return f"dw_match_pattern({column})"
+
+    like_pattern = _build_like_pattern(pattern)
+    params.append(like_pattern)
+    if case_sensitive:
+        return f"{column} LIKE ? ESCAPE '\\'"
+    return f"LOWER({column}) LIKE LOWER(?) ESCAPE '\\'"
+
+
+def _build_like_pattern(pattern: str) -> str:
+    escaped = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _merge_volume_row(agg: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     row = dict(agg)
     if meta:
@@ -682,6 +770,213 @@ def dashboard(
                 f"{agg['volume_id']} @ {agg['directory']} => total={agg['total_events']}"
                 f" (created={agg['created']}, modified={agg['modified']}, deleted={agg['deleted']})"
             )
+
+
+@app.command()
+def volumes(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON payload instead of text."),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="Include the stored lsblk_json payload in output.",
+    ),
+) -> None:
+    """Show stored volume snapshots and identity metadata."""
+
+    try:
+        with init_db() as conn:
+            records = fetch_volume_metadata(conn)
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+        return
+
+    if not records:
+        typer.echo("No volumes recorded yet.")
+        return
+
+    if as_json:
+        payload = []
+        for row in records:
+            record = dict(row)
+            record["mount_metadata"] = _extract_mount_metadata(record)
+            if not raw:
+                record.pop("lsblk_json", None)
+            payload.append(record)
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    for row in records:
+        typer.echo(f"{row['volume_id']} @ {row['directory']}")
+        typer.echo(
+            "  events : "
+            f"total={row['event_count']} created={row['created_count']} "
+            f"modified={row['modified_count']} deleted={row['deleted_count']}"
+        )
+        typer.echo(f"  usage  : {_format_usage_line(row)}")
+
+        mount = _extract_mount_metadata(row) or {}
+        mount_line = _format_details_line(
+            "  mount  : ",
+            {
+                "device": mount.get("device"),
+                "mount": mount.get("mount_point"),
+            },
+        )
+        ids_line = _format_details_line(
+            "  ids    : ",
+            {
+                "volume": mount.get("volume_id"),
+                "uuid": mount.get("uuid"),
+                "label": mount.get("label"),
+            },
+        )
+        lsblk = mount.get("lsblk") or {}
+        block_line = _format_details_line(
+            "  block  : ",
+            {
+                "model": lsblk.get("MODEL"),
+                "serial": lsblk.get("SERIAL"),
+                "vendor": lsblk.get("VENDOR"),
+                "size": lsblk.get("SIZE"),
+                "fsver": lsblk.get("FSVER"),
+            },
+        )
+        layout_line = _format_details_line(
+            "  layout : ",
+            {
+                "pttype": lsblk.get("PTTYPE"),
+                "ptuuid": lsblk.get("PTUUID"),
+                "parttype": lsblk.get("PARTTYPE"),
+                "partuuid": lsblk.get("PARTUUID"),
+                "wwn": lsblk.get("WWN"),
+            },
+        )
+        partname_line = _format_details_line(
+            "  part   : ",
+            {"name": lsblk.get("PARTTYPENAME")},
+        )
+        identity_line = _format_details_line(
+            "  identity: ",
+            {
+                "refreshed": mount.get("identity_refreshed_at"),
+                "source": mount.get("source"),
+            },
+        )
+
+        for detail in (
+            mount_line,
+            ids_line,
+            block_line,
+            layout_line,
+            partname_line,
+            identity_line,
+        ):
+            if detail:
+                typer.echo(detail)
+
+        if raw and row.get("lsblk_json"):
+            typer.echo(f"  lsblk_json: {row['lsblk_json']}")
+
+        typer.echo("")
+
+
+@app.command()
+def search(
+    pattern: str = typer.Argument(..., help="Substring or regular expression to match."),
+    files: bool = typer.Option(True, "--files/--no-files", help="Include files in the results."),
+    directories: bool = typer.Option(False, "--dirs/--no-dirs", help="Include directories in the results."),
+    regex: bool = typer.Option(False, "--regex", help="Treat pattern as a regular expression."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Match with case sensitivity."),
+    include_deleted: bool = typer.Option(False, "--include-deleted", help="Include deleted files in results."),
+    limit: int = typer.Option(50, help="Maximum rows per section."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON payload instead of text."),
+) -> None:
+    """Search the catalog for files and/or directories."""
+
+    if not files and not directories:
+        raise typer.BadParameter("Enable files and/or directories to search.")
+
+    try:
+        with init_db() as conn:
+            conn.row_factory = sqlite3.Row
+
+            if regex:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                try:
+                    compiled = re.compile(pattern, flags)
+                except re.error as exc:
+                    raise typer.BadParameter(f"Invalid regular expression: {exc}") from exc
+
+                def _match(value: Optional[str]) -> int:
+                    return int(bool(value and compiled.search(value)))
+
+                conn.create_function("dw_match_pattern", 1, _match)
+            else:
+                compiled = None
+
+            file_results = []
+            dir_results = []
+
+            if files:
+                file_results = _search_files(
+                    conn,
+                    pattern,
+                    regex=bool(compiled),
+                    case_sensitive=case_sensitive,
+                    include_deleted=include_deleted,
+                    limit=limit,
+                )
+
+            if directories:
+                dir_results = _search_directories(
+                    conn,
+                    pattern,
+                    regex=bool(compiled),
+                    case_sensitive=case_sensitive,
+                    include_deleted=include_deleted,
+                    limit=limit,
+                )
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+        return
+
+    if as_json:
+        payload: Dict[str, Any] = {}
+        if files:
+            payload["files"] = file_results
+        if directories:
+            payload["directories"] = dir_results
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    if files:
+        if file_results:
+            typer.echo("Files:")
+            for row in file_results:
+                deleted = "yes" if row.get("is_deleted") else "no"
+                typer.echo(
+                    f"- {row['path']}\n"
+                    f"  volume={row['volume_id']} directory={row['directory']}\n"
+                    f"  last_event={row['last_event_type'] or '-'} at {row['last_event_timestamp'] or '-'} deleted={deleted}"
+                )
+        else:
+            typer.echo("Files: (no matches)")
+
+    if directories:
+        if files:
+            typer.echo("")
+        if dir_results:
+            typer.echo("Directories:")
+            for row in dir_results:
+                typer.echo(
+                    f"- {row['directory']} (volume={row['volume_id']})\n"
+                    f"  files={row['total_files']} active={row['active_files']} last_seen={row['last_seen'] or '-'}"
+                )
+        else:
+            typer.echo("Directories: (no matches)")
+
+    if not file_results and not dir_results:
+        typer.echo("\nNo matches found.")
 
 
 @app.command()

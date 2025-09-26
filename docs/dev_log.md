@@ -1,4 +1,42 @@
 ---
+date: 2025-09-26T03:58:17Z
+task: "Add volumes CLI + identity backoff"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [feature, cli, utils]
+---
+
+**Summary.** Added a `diskwatcher volumes` shortcut and tuned the watcher
+identity refresh so lsblk snapshots are captured once and retried with
+exponential backoff only when data is incomplete.
+
+**Highlights.**
+- New CLI command surfaces stored `mount_*`/`lsblk_*` columns in both text and
+  JSON (with optional raw payload) so operators can inspect detached media
+  without hitting lsblk (`src/diskwatcher/core/cli.py:684`, `README.md:61`).
+- Watchers now cache mount metadata after the first successful capture and only
+  retry lsblk with a widening interval when the payload is missing identity
+  fields, preventing repeated subprocess calls (`src/diskwatcher/core/watcher.py:19`).
+- Regression tests cover the new command and the identity refresh throttle to
+  ensure we keep the low-noise behaviour (`tests/test_cli.py:324`, `tests/test_diskwatcher.py:309`).
+
+**Challenges.**
+- Balancing retries for environments lacking lsblk required a monotonic clock
+  shim in tests to validate the backoff path.
+
+**Suggestions.**
+- Consider exposing a config knob for the backoff ceiling if labs need stricter
+  retry windows during hardware swaps.
+
+**Score.**
+Novelty: medium
+Importance: medium
+Difficulty: medium
+
+**Signature.** @codex
+
+---
 date: 2025-09-25T22:55:12Z
 task: "Persist lsblk identity snapshots"
 branch: "main"

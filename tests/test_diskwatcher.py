@@ -285,3 +285,78 @@ def test_manager_reuses_single_connection(tmp_path, monkeypatch):
     finally:
         manager.threads.clear()
         manager.stop_all()
+
+
+def test_disk_watcher_captures_mount_metadata_once(monkeypatch, temp_db):
+    calls = []
+
+    def fake_get_mount_info(path):
+        calls.append(path)
+        return {
+            "directory": path,
+            "mount_point": path,
+            "device": path,
+            "volume_id": "vol-single",
+            "uuid": "uuid-single",
+            "lsblk": {"SERIAL": "SER1"},
+        }
+
+    monkeypatch.setattr("diskwatcher.core.watcher.get_mount_info", fake_get_mount_info)
+
+    watcher = DiskWatcher("/tmp", conn=temp_db)
+    assert len(calls) == 1
+
+    watcher.log_event("created", "/tmp/example.txt")
+    assert len(calls) == 1
+
+
+def test_disk_watcher_backoff_retries_until_complete(monkeypatch, temp_db):
+    class Monotonic:
+        def __init__(self, values):
+            self.values = iter(values)
+            self.last = 0.0
+
+        def __call__(self):
+            try:
+                self.last = next(self.values)
+            except StopIteration:
+                pass
+            return self.last
+
+    monotonic = Monotonic([0.0, 10.0, 400.0])
+    monkeypatch.setattr("diskwatcher.core.watcher.time.monotonic", monotonic)
+
+    call_count = 0
+
+    def fake_get_mount_info(path):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "directory": path,
+                "mount_point": path,
+                "device": path,
+                "volume_id": "vol-retry",
+                "lsblk": None,
+            }
+        return {
+            "directory": path,
+            "mount_point": path,
+            "device": path,
+            "volume_id": "vol-retry",
+            "uuid": "uuid-final",
+            "lsblk": {"SERIAL": "SER2"},
+        }
+
+    monkeypatch.setattr("diskwatcher.core.watcher.get_mount_info", fake_get_mount_info)
+
+    watcher = DiskWatcher("/tmp", conn=temp_db)
+    assert call_count == 1
+
+    # Monotonic returns 10.0 -> scheduled refresh not reached
+    watcher.log_event("created", "/tmp/example.txt")
+    assert call_count == 1
+
+    # Advance time to trigger retry (400.0)
+    watcher._refresh_mount_metadata()
+    assert call_count == 2

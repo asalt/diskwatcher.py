@@ -74,9 +74,12 @@ def _run_cli(args, home, *, config_dir: Optional[Path] = None, env_update: Optio
     )
 
 
-def _stdout_json(output: str) -> dict:
-    start = output.find("{")
-    assert start != -1, f"No JSON payload in output: {output!r}"
+def _stdout_json(output: str):
+    obj_start = output.find("{")
+    list_start = output.find("[")
+    candidates = [index for index in (obj_start, list_start) if index != -1]
+    assert candidates, f"No JSON payload in output: {output!r}"
+    start = min(candidates)
     return json.loads(output[start:])
 
 
@@ -296,6 +299,62 @@ def test_dashboard_json_output(monkeypatch, tmp_path):
     assert "vol-json" in result.output
 
 
+def test_volumes_command_text(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    mount_factory = _mock_mount_info("vol-list")
+    with init_db() as conn:
+        mount_metadata = mount_factory(str(tmp_path))
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "file.txt"),
+            directory=str(tmp_path),
+            volume_id="vol-list",
+            process_id="pid",
+            mount_metadata=mount_metadata,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["volumes"])
+
+    assert result.exit_code == 0
+    assert "vol-list @" in result.output
+    assert "model=MockDrive" in result.output
+    assert "identity:" in result.output
+    assert "lsblk_json" not in result.output
+
+
+def test_volumes_command_json(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    mount_factory = _mock_mount_info("vol-jsonlist")
+    with init_db() as conn:
+        mount_metadata = mount_factory(str(tmp_path))
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "file.txt"),
+            directory=str(tmp_path),
+            volume_id="vol-jsonlist",
+            process_id="pid",
+            mount_metadata=mount_metadata,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["volumes", "--json"])
+    assert result.exit_code == 0
+    payload = _stdout_json(result.output)
+    assert isinstance(payload, list)
+    assert payload[0]["volume_id"] == "vol-jsonlist"
+    assert "lsblk_json" not in payload[0]
+    assert payload[0]["mount_metadata"]["lsblk"]["MODEL"] == "MockDrive"
+
+    raw_result = runner.invoke(app, ["volumes", "--json", "--raw"])
+    raw_payload = _stdout_json(raw_result.output)
+    assert raw_payload[0]["lsblk_json"]
+
+
 def test_dashboard_handles_empty_catalog(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
 
@@ -304,6 +363,92 @@ def test_dashboard_handles_empty_catalog(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert "No file activity recorded yet." in result.output
+
+
+def test_search_files_default(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    file_path = tmp_path / "alpha.txt"
+    file_path.write_text("alpha")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_path),
+            directory=str(tmp_path),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["search", "alpha"])
+
+    assert result.exit_code == 0
+    assert "alpha.txt" in result.output
+    assert "Files:" in result.output
+
+
+def test_search_directories_json(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "file.txt").write_text("content")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(nested / "file.txt"),
+            directory=str(nested),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "search",
+            "nested",
+            "--dirs",
+            "--no-files",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = _stdout_json(result.output)
+    assert payload["directories"][0]["directory"].endswith("nested")
+
+
+def test_search_regex(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    file_path = tmp_path / "beta001.log"
+    file_path.write_text("beta")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_path),
+            directory=str(tmp_path),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "search",
+            r"beta\d+\.log",
+            "--regex",
+            "--case-sensitive",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "beta001.log" in result.output
 
 
 def test_stream_outputs_new_events(monkeypatch, tmp_path):

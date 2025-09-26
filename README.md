@@ -61,6 +61,19 @@ table, including usage bytes and refresh timestamps). Each volume row now also
 exposes a `mount_metadata` object mirroring the `get_mount_info()` payload so
 downstream tools can read the raw `lsblk` data without shelling out.
 
+### Inspect stored volumes
+
+```bash
+diskwatcher volumes --json --raw
+```
+
+- Prints the persisted `volumes` table, including the stored mount information
+  captured the first time the watcher saw the drive.
+- `--raw` includes the serialized `lsblk_json` snapshot for forensic tooling; omit
+  it to keep the payload concise.
+- The text form mirrors the `status` view with identity, block layout, and usage
+  summaries for each catalogued device.
+
 ### Browse catalog contents
 
 ```bash

@@ -16,7 +16,19 @@ from diskwatcher.utils.logging import get_logger
 # logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = get_logger(__name__)
 
-MOUNT_METADATA_REFRESH_SECONDS = 300
+MOUNT_METADATA_INITIAL_REFRESH_SECONDS = 300
+MOUNT_METADATA_MAX_REFRESH_SECONDS = 3600
+
+
+def _metadata_complete(metadata: Optional[dict[str, Any]]) -> bool:
+    if not metadata:
+        return False
+    lsblk = metadata.get("lsblk")
+    if isinstance(lsblk, dict):
+        for key in ("UUID", "PTUUID", "PARTUUID", "SERIAL", "WWN"):
+            if lsblk.get(key):
+                return True
+    return False
 
 
 class DiskWatcher(FileSystemEventHandler):
@@ -39,6 +51,8 @@ class DiskWatcher(FileSystemEventHandler):
         self.uuid = uuid or str(self.path)
         self._mount_metadata: Optional[dict[str, Any]] = None
         self._mount_metadata_refreshed_at: float = 0.0
+        self._mount_metadata_interval: float = MOUNT_METADATA_INITIAL_REFRESH_SECONDS
+        self._next_mount_metadata_refresh: float = 0.0
 
         initial_metadata = self._refresh_mount_metadata(force=True)
         if uuid is None and initial_metadata:
@@ -68,6 +82,8 @@ class DiskWatcher(FileSystemEventHandler):
     def log_event(self, event_type: str, path: str):
         mount_metadata = self._refresh_mount_metadata()
         metadata_payload = dict(mount_metadata) if mount_metadata else None
+        if metadata_payload is not None:
+            metadata_payload.setdefault("source", "watcher")
         if self.conn:
             logger.debug("Logging event to shared connection", extra={"volume_id": self.uuid})
             if self.conn_lock:
@@ -126,11 +142,11 @@ class DiskWatcher(FileSystemEventHandler):
 
     def _refresh_mount_metadata(self, force: bool = False) -> Optional[dict[str, Any]]:
         now = time.monotonic()
-        if (
-            not force
-            and self._mount_metadata is not None
-            and (now - self._mount_metadata_refreshed_at) < MOUNT_METADATA_REFRESH_SECONDS
-        ):
+
+        if self._mount_metadata is not None and _metadata_complete(self._mount_metadata):
+            return self._mount_metadata
+
+        if not force and self._mount_metadata is not None and now < self._next_mount_metadata_refresh:
             return self._mount_metadata
 
         try:
@@ -140,10 +156,10 @@ class DiskWatcher(FileSystemEventHandler):
                 "mount_metadata_refresh_failed",
                 extra={"path": str(self.path), "error": str(exc)},
             )
-            return self._mount_metadata
+            return self._schedule_next_mount_refresh(now)
 
         if not isinstance(info, dict):  # pragma: no cover - defensive guard
-            return self._mount_metadata
+            return self._schedule_next_mount_refresh(now)
 
         metadata = dict(info)
         metadata.setdefault("mount_point", metadata.get("mount_point") or str(self.path))
@@ -151,6 +167,18 @@ class DiskWatcher(FileSystemEventHandler):
 
         self._mount_metadata = metadata
         self._mount_metadata_refreshed_at = now
+
+        if _metadata_complete(metadata):
+            self._next_mount_metadata_refresh = float("inf")
+        else:
+            self._schedule_next_mount_refresh(now)
+
+        return self._mount_metadata
+
+    def _schedule_next_mount_refresh(self, now: float) -> Optional[dict[str, Any]]:
+        interval = max(self._mount_metadata_interval, MOUNT_METADATA_INITIAL_REFRESH_SECONDS)
+        self._next_mount_metadata_refresh = now + interval
+        self._mount_metadata_interval = min(interval * 2, MOUNT_METADATA_MAX_REFRESH_SECONDS)
         return self._mount_metadata
 
     def archive_existing_files(self, interruptible: bool = False):

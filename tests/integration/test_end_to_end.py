@@ -39,6 +39,19 @@ def test_manager_records_events_and_cli_reports(monkeypatch, artifact_dir):
                 "label": "",
                 "device": str(path),
                 "volume_id": "integration-vol",
+                "lsblk": {"SERIAL": "SER-INT"},
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "diskwatcher.core.watcher.get_mount_info",
+            lambda path: {
+                "directory": str(path),
+                "mount_point": str(path),
+                "device": str(path),
+                "volume_id": "integration-vol",
+                "uuid": "integration-vol",
+                "lsblk": {"SERIAL": "SER-INT"},
             },
             raising=False,
         )
