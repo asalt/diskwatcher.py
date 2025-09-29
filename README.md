@@ -48,6 +48,16 @@ diskwatcher run /mnt/e /media/alex --log-level info
   scans/watchers (with progress and last heartbeat) alongside the usual event
   and volume summaries; use `--json` to pull the raw job payload for dashboards.
 
+### Web dashboard
+
+```bash
+diskwatcher web --host 0.0.0.0 --port 5000
+```
+
+- Serves a lightweight Flask UI that auto-refreshes with the latest jobs,
+  volumes, and event samples from the shared catalog.
+- Adjust refresh cadence or event depth with `--refresh` / `--event-limit`.
+
 ### Inspect status
 
 ```bash

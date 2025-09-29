@@ -14,6 +14,7 @@ tags: [performance, concurrency]
 - Wired the CLI to detect multi-volume sessions and honour the new `run.max_scan_workers` limit (default 4) for predictable startup (`src/diskwatcher/core/cli.py:173`, `src/diskwatcher/utils/config.py:125`).
 - Persisted active job state in a dedicated `jobs` table so scans/watchers surface live progress across processes (`src/diskwatcher/db/jobs.py:1`, `src/diskwatcher/sql/schema.sql:43`).
 - Introduced auto-discovery roots so new mounts under locations like `/media` are picked up, scanned, and watched without manual intervention (`src/diskwatcher/core/manager.py:179`, `src/diskwatcher/core/cli.py:173`).
+- Added a Flask dashboard (`diskwatcher web`) that renders the jobs/volume/event snapshot with auto-refreshing pages for on-call operators (`src/diskwatcher/web/server.py:1`, `tests/test_web.py:1`).
 - Documented the knob and expanded watcher stats/tests so operators and status snapshots stay aligned (`README.md:32`, `src/diskwatcher/core/watcher.py:195`, `tests/test_diskwatcher.py:253`).
 
 **Challenges.**

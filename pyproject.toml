@@ -13,6 +13,7 @@ dependencies = [
     "watchdog",
     "alembic>=1.13",
     "typer>=0.12",
+    "flask>=2.3",
 ]
 requires-python = ">=3.8"
 
@@ -21,7 +22,13 @@ diskwatcher = "diskwatcher.core.cli:entrypoint"
 
 
 [tool.setuptools]
-packages = ["diskwatcher", "diskwatcher.core", "diskwatcher.utils"]
+packages = [
+    "diskwatcher",
+    "diskwatcher.core",
+    "diskwatcher.utils",
+    "diskwatcher.db",
+    "diskwatcher.web",
+]
 package-dir = { "" = "src" }
 
 [tool.pyright]

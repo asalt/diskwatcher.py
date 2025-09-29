@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="{{ refresh_seconds }}">
+  <title>DiskWatcher Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; background-color: #fafafa; color: #222; }
+    h1 { margin-bottom: 0.25rem; }
+    h2 { margin-top: 2rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #ddd; text-align: left; }
+    th { background-color: #f0f0f0; }
+    tr:nth-child(odd) td { background-color: #fdfdfd; }
+    code { font-size: 0.9em; }
+    .job-status { font-weight: bold; }
+    .timestamp { color: #666; font-size: 0.9em; }
+    .empty { color: #777; font-style: italic; }
+  </style>
+</head>
+<body>
+  <h1>DiskWatcher Dashboard</h1>
+  <p class="timestamp">Last refreshed: {{ updated_at.isoformat() }}</p>
+  <p class="timestamp">Auto-refresh every {{ refresh_seconds }} seconds</p>
+
+  <section>
+    <h2>Active Jobs</h2>
+    {% if jobs %}
+      <table>
+        <thead>
+          <tr>
+            <th>Job</th>
+            <th>Type</th>
+            <th>Volume / Path</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for job in jobs %}
+          <tr>
+            <td><code>{{ job.job_id[:8] }}</code></td>
+            <td>{{ job.job_type }}</td>
+            <td>{{ job.volume_id or job.path }}</td>
+            <td class="job-status">{{ job.status }}</td>
+            <td>
+              {% if job.progress %}
+                {% set parts = [] %}
+                {% for key, value in job.progress.items() %}
+                  {% if key not in ['uuid', 'path'] %}
+                    {% set _ = parts.append(key ~ '=' ~ value) %}
+                  {% endif %}
+                {% endfor %}
+                {% if parts %}
+                  {{ ', '.join(parts) }}
+                {% else %}
+                  <span class="empty">No metrics</span>
+                {% endif %}
+              {% else %}
+                <span class="empty">No metrics</span>
+              {% endif %}
+            </td>
+            <td>{{ job.updated_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No active jobs.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Volumes</h2>
+    {% if volumes %}
+      <table>
+        <thead>
+          <tr>
+            <th>Volume</th>
+            <th>Directory</th>
+            <th>Total</th>
+            <th>Created</th>
+            <th>Modified</th>
+            <th>Deleted</th>
+            <th>Last Event</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for volume in volumes %}
+          <tr>
+            <td><code>{{ volume.volume_id }}</code></td>
+            <td>{{ volume.directory }}</td>
+            <td>{{ volume.total_events or volume.event_count or 0 }}</td>
+            <td>{{ volume.created or volume.created_count or 0 }}</td>
+            <td>{{ volume.modified or volume.modified_count or 0 }}</td>
+            <td>{{ volume.deleted or volume.deleted_count or 0 }}</td>
+            <td>{{ volume.last_event_timestamp or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No volumes recorded yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Recent Events</h2>
+    {% if events %}
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Type</th>
+            <th>Volume</th>
+            <th>Path</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in events %}
+          <tr>
+            <td>{{ event.timestamp }}</td>
+            <td>{{ event.event_type }}</td>
+            <td><code>{{ event.volume_id }}</code></td>
+            <td>{{ event.path }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No events recorded.</p>
+    {% endif %}
+  </section>
+</body>
+</html>

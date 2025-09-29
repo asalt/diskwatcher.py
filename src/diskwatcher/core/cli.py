@@ -306,6 +306,31 @@ def run(
     # watcher.start()
 
 
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", help="Interface to bind the dashboard server."),
+    port: int = typer.Option(5000, help="Port to run the dashboard server."),
+    refresh: int = typer.Option(5, help="Seconds between dashboard auto-refresh."),
+    event_limit: int = typer.Option(25, help="Number of recent events to display."),
+) -> None:
+    """Run a small web dashboard showing live jobs, volumes, and events."""
+
+    try:
+        from diskwatcher.web import create_app
+    except ImportError as exc:  # pragma: no cover - defensive guard
+        typer.echo(f"Flask is required for the dashboard: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"Starting dashboard on http://{host}:{port} (refresh {refresh}s, events {event_limit})"
+    )
+    app = create_app(refresh_seconds=refresh, event_limit=event_limit)
+    try:
+        app.run(host=host, port=port)
+    except KeyboardInterrupt:
+        typer.echo("Stopping dashboard...")
+
+
 @config_app.command("show")
 def config_show(
     as_json: bool = typer.Option(False, "--json", help="Emit configuration as JSON."),
