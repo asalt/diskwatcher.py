@@ -104,6 +104,10 @@ def test_config_show_defaults(tmp_path):
     assert options["log.level"]["value"] == "info"
     assert options["log.level"]["source"] == "default"
     assert options["run.auto_scan"]["value"] is True
+    assert options["run.auto_discover_roots"]["value"] == []
+    assert options["run.auto_discover_roots"]["source"] == "default"
+    assert options["run.max_scan_workers"]["value"] == 4
+    assert options["run.max_scan_workers"]["source"] == "default"
     assert paths["database_dir"].endswith(".diskwatcher")
     assert paths["database_file"].endswith("diskwatcher.db")
 
@@ -117,6 +121,20 @@ def test_config_set_and_show(tmp_path):
     )
     assert set_result.returncode == 0
 
+    set_workers = _run_cli(
+        ["config", "set", "run.max_scan_workers", "2"],
+        home=tmp_path,
+        config_dir=config_dir,
+    )
+    assert set_workers.returncode == 0
+
+    set_roots = _run_cli(
+        ["config", "set", "run.auto_discover_roots", '["/media"]'],
+        home=tmp_path,
+        config_dir=config_dir,
+    )
+    assert set_roots.returncode == 0
+
     show_result = _run_cli(
         ["config", "show", "--json"],
         home=tmp_path,
@@ -127,6 +145,10 @@ def test_config_set_and_show(tmp_path):
     paths = data["paths"]
     assert options["log.level"]["value"] == "debug"
     assert options["log.level"]["source"] == "user"
+    assert options["run.auto_discover_roots"]["value"] == ["/media"]
+    assert options["run.auto_discover_roots"]["source"] == "user"
+    assert options["run.max_scan_workers"]["value"] == 2
+    assert options["run.max_scan_workers"]["source"] == "user"
     assert Path(paths["config_dir"]).resolve() == config_dir.resolve()
 
 
@@ -227,6 +249,7 @@ def test_status_json_output(monkeypatch, tmp_path):
     assert result.exit_code == 0
     payload = _stdout_json(result.output)
     assert "events" in payload
+    assert "jobs" in payload
     volumes = payload["volumes"]
     assert isinstance(volumes, list)
     target = next((row for row in volumes if row["volume_id"] == "vol-json"), None)

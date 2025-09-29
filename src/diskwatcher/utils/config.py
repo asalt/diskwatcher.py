@@ -86,6 +86,34 @@ def _parse_log_level(value: str) -> str:
     return normalized
 
 
+def _parse_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigError("Expected an integer") from exc
+    if parsed < 1:
+        raise ConfigError("Value must be greater than or equal to 1")
+    return parsed
+
+
+def _parse_path_list(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("Expected a JSON array of paths") from exc
+
+    if not isinstance(parsed, list):
+        raise ConfigError("Expected a JSON array of paths")
+
+    normalized: list[str] = []
+    for item in parsed:
+        if not isinstance(item, str):
+            raise ConfigError("Auto-discover roots must be strings")
+        normalized.append(str(Path(item).expanduser()))
+
+    return normalized
+
+
 @dataclass(frozen=True)
 class Option:
     key: str
@@ -106,6 +134,13 @@ class Option:
             raise ConfigError(
                 f"Config key '{self.key}' must be one of {', '.join(map(str, self.choices))}"
             )
+        if self.value_type == "list":
+            if not isinstance(value, list):
+                raise ConfigError(f"Config key '{self.key}' expects a list value")
+            if not all(isinstance(item, str) for item in value):
+                raise ConfigError(
+                    f"Config key '{self.key}' expects list entries to be strings"
+                )
         return value
 
 
@@ -127,6 +162,20 @@ OPTIONS: Dict[str, Option] = {
         default=True,
         description="Control whether the run command performs the initial archival scan.",
         value_type="boolean",
+    ),
+    "run.auto_discover_roots": Option(
+        key="run.auto_discover_roots",
+        parser=_parse_path_list,
+        default=[],
+        description="Root directories where DiskWatcher will auto-monitor new subdirectories as they appear.",
+        value_type="list",
+    ),
+    "run.max_scan_workers": Option(
+        key="run.max_scan_workers",
+        parser=_parse_positive_int,
+        default=4,
+        description="Upper bound on parallel processes used during the initial archival scan.",
+        value_type="integer",
     ),
 }
 

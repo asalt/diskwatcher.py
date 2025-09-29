@@ -1,4 +1,35 @@
 ---
+date: 2025-09-28T06:12:56Z
+task: "Parallelize initial scans"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [performance, concurrency]
+---
+
+**Summary.** Shifted the archival sweep into a multiprocessing helper and added a configurable worker cap so each watched mount catalogs in parallel without starving subsequent event watching.
+
+**Highlights.**
+- Added `DiskWatcherManager.run_initial_scans` to resolve the shared catalog, queue scan stats, and fan-out work into child processes while reconciling results (`src/diskwatcher/core/manager.py:79`).
+- Wired the CLI to detect multi-volume sessions and honour the new `run.max_scan_workers` limit (default 4) for predictable startup (`src/diskwatcher/core/cli.py:173`, `src/diskwatcher/utils/config.py:125`).
+- Persisted active job state in a dedicated `jobs` table so scans/watchers surface live progress across processes (`src/diskwatcher/db/jobs.py:1`, `src/diskwatcher/sql/schema.sql:43`).
+- Introduced auto-discovery roots so new mounts under locations like `/media` are picked up, scanned, and watched without manual intervention (`src/diskwatcher/core/manager.py:179`, `src/diskwatcher/core/cli.py:173`).
+- Documented the knob and expanded watcher stats/tests so operators and status snapshots stay aligned (`README.md:32`, `src/diskwatcher/core/watcher.py:195`, `tests/test_diskwatcher.py:253`).
+
+**Challenges.**
+- Mocking process pools and mount metadata consistently across modules required careful monkeypatching to keep tests deterministic in the sandbox.
+
+**Suggestions.**
+- Monitor CPU/disk contention during large rack imports to confirm the default worker cap remains sensible as hardware scales.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
 date: 2025-09-26T03:58:17Z
 task: "Add volumes CLI + identity backoff"
 branch: "main"

@@ -63,3 +63,21 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_directory ON files (directory);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    path TEXT,
+    volume_id TEXT,
+    status TEXT NOT NULL,
+    progress_json TEXT,
+    owner_pid TEXT,
+    owner_host TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
+CREATE INDEX IF NOT EXISTS idx_jobs_volume ON jobs (volume_id);

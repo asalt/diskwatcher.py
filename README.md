@@ -34,6 +34,19 @@ diskwatcher run /mnt/e /media/alex --log-level info
   `diskwatcher config set run.auto_scan false` to disable it by default.
 - The archival sweep logs structured progress every few hundred files so you can
   monitor long-running scans in `~/.diskwatcher/diskwatcher.log`.
+- When you watch multiple volumes, DiskWatcher fan-outs the archival sweep into
+  a small pool of worker processes (capped at four by default) so each mount
+  catalogs independently before its watcher thread starts tailing live events.
+  Tune the cap with `diskwatcher config set run.max_scan_workers <N>` if racks
+  host more (or fewer) disks than the default concurrency can accommodate.
+- To auto-load devices that appear beneath a known root (for example `/media`),
+  add it with `diskwatcher config set run.auto_discover_roots '["/media"]'` or
+  pass `--discover-root /media` to `diskwatcher run`; DiskWatcher will start a
+  new watcher (and optional archival scan) every time a mount shows up and stop
+  it cleanly when the directory disappears.
+- `diskwatcher status` now surfaces the `jobs` table so you can see active
+  scans/watchers (with progress and last heartbeat) alongside the usual event
+  and volume summaries; use `--json` to pull the raw job payload for dashboards.
 
 ### Inspect status
 

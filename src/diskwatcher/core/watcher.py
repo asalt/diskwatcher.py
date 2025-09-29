@@ -10,6 +10,7 @@ from threading import Event, Lock
 from typing import Any, Optional
 
 from diskwatcher.db import init_db, log_event
+from diskwatcher.db.jobs import JobHandle
 from diskwatcher.utils.devices import get_mount_info
 from diskwatcher.utils.logging import get_logger
 
@@ -120,7 +121,13 @@ class DiskWatcher(FileSystemEventHandler):
                     mount_metadata=metadata_payload,
                 )
 
-    def start(self, recursive=True, run_once=False, stop_event: Optional[Event] = None):
+    def start(
+        self,
+        recursive=True,
+        run_once=False,
+        stop_event: Optional[Event] = None,
+        job_tracker: Optional[JobHandle] = None,
+    ):
 
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be a threading.Event or None")
@@ -131,14 +138,21 @@ class DiskWatcher(FileSystemEventHandler):
         logger.info(f"Watching {self.uuid} : {self.path}...")
         observer.start()
 
+        if job_tracker:
+            job_tracker.update(status="running", progress={"path": str(self.path)})
+
         try:
             while True:
                 time.sleep(1)
+                if job_tracker:
+                    job_tracker.heartbeat()
                 if run_once or (stop_event and stop_event.is_set()):
                     break
         finally:
             observer.stop()
             observer.join()
+            if job_tracker:
+                job_tracker.update(status="stopping")
 
     def _refresh_mount_metadata(self, force: bool = False) -> Optional[dict[str, Any]]:
         now = time.monotonic()
@@ -181,7 +195,11 @@ class DiskWatcher(FileSystemEventHandler):
         self._mount_metadata_interval = min(interval * 2, MOUNT_METADATA_MAX_REFRESH_SECONDS)
         return self._mount_metadata
 
-    def archive_existing_files(self, interruptible: bool = False):
+    def archive_existing_files(
+        self,
+        interruptible: bool = False,
+        job_tracker: Optional[JobHandle] = None,
+    ):
         """
         Recursively walk each watched dir and log all files as 'existing'.
         If interruptible is True, watcher.stop_event can be set to cancel.
@@ -197,7 +215,12 @@ class DiskWatcher(FileSystemEventHandler):
             "started_at": datetime.now(timezone.utc).isoformat(),
             "files_scanned": 0,
             "directories_seen": 0,
+            "uuid": self.uuid,
+            "path": str(self.path),
         }
+
+        if job_tracker:
+            job_tracker.update(status="running", progress=dict(self.scan_stats))
 
         logger.info(
             "initial_scan_start",
@@ -228,7 +251,12 @@ class DiskWatcher(FileSystemEventHandler):
                         "elapsed_seconds": round(time.time() - started_at, 2),
                     }
                 )
-                return
+                if job_tracker:
+                    job_tracker.update(
+                        status="interrupted",
+                        progress=dict(self.scan_stats),
+                    )
+                return dict(self.scan_stats)
             directories_seen += 1
             for fname in files:
                 full = Path(root) / fname
@@ -250,6 +278,8 @@ class DiskWatcher(FileSystemEventHandler):
                             "directories_seen": directories_seen,
                         },
                     )
+                    if job_tracker:
+                        job_tracker.heartbeat(progress=dict(self.scan_stats))
 
         elapsed = time.time() - started_at
         logger.info(
@@ -269,8 +299,13 @@ class DiskWatcher(FileSystemEventHandler):
             "directories_seen": directories_seen,
             "elapsed_seconds": elapsed,
             "completed_at": datetime.now(timezone.utc).isoformat(),
+            "uuid": self.uuid,
+            "path": str(self.path),
         }
 
+        if job_tracker:
+            job_tracker.heartbeat(progress=dict(self.scan_stats))
+        return dict(self.scan_stats)
 
 # class DiskWatcherThread(threading.Thread):
 #     def __init__(self, path: Path, uuid: Optional[str] = None):
@@ -304,6 +339,8 @@ class DiskWatcherThread(threading.Thread):
         self.stop_event = threading.Event()
         self.conn = conn
         self.conn_lock = conn_lock
+        self.scan_job: Optional[JobHandle] = None
+        self.watch_job: Optional[JobHandle] = None
 
         self.watcher = DiskWatcher(
             str(self.path),
@@ -314,10 +351,27 @@ class DiskWatcherThread(threading.Thread):
         self.uuid = self.watcher.uuid
 
     def run(self):
+        if self.watch_job:
+            self.watch_job.update(status="running")
         try:
-            self.watcher.start(stop_event=self.stop_event)
+            self.watcher.start(stop_event=self.stop_event, job_tracker=self.watch_job)
         except Exception as e:
             logger.exception("Watcher error", extra={"path": str(self.path)})
+            if self.watch_job:
+                self.watch_job.fail(error=str(e))
+        else:
+            if self.watch_job:
+                self.watch_job.complete(status="stopped")
 
     def stop(self):
         self.stop_event.set()
+
+    def set_watcher_job(self, job: JobHandle) -> None:
+        self.watch_job = job
+
+    def clear_watcher_job(self, status: str = "stopped") -> None:
+        if self.watch_job:
+            if status not in {"stopped", "complete"}:
+                self.watch_job.update(status=status)
+            self.watch_job.complete(status=status)
+            self.watch_job = None

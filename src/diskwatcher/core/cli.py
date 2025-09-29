@@ -16,7 +16,7 @@ from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils import config as config_utils
 from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
 from diskwatcher.utils.devices import get_mount_info
-from diskwatcher.db import init_db, query_events
+from diskwatcher.db import init_db, query_events, fetch_jobs
 from diskwatcher.db.connection import DB_PATH, DB_DIR
 from diskwatcher.db.events import (
     summarize_by_volume,
@@ -139,6 +139,15 @@ def run(
         "--scan/--no-scan",
         help="Control the initial archival scan (config key: run.auto_scan).",
     ),
+    discover_roots: Optional[List[Path]] = typer.Option(
+        None,
+        "--discover-root",
+        help="Automatically monitor new subdirectories created under this root (repeatable).",
+        metavar="PATH",
+        dir_okay=True,
+        file_okay=False,
+        resolve_path=True,
+    ),
 ) -> None:
     """Start monitoring a directory (defaults to auto-detected mount points)."""
     logger = get_logger(__name__)
@@ -147,37 +156,97 @@ def run(
     if scan is not None:
         perform_scan = scan
 
+    def _resolve_path(candidate: Path) -> Path:
+        try:
+            return candidate.resolve()
+        except FileNotFoundError:
+            return candidate
+
+    config_roots = _get_config_value("run.auto_discover_roots")
+    configured_auto_roots = [Path(root).expanduser() for root in config_roots]
+
+    if discover_roots:
+        auto_roots = [_resolve_path(Path(root)) for root in discover_roots]
+    elif configured_auto_roots:
+        auto_roots = [_resolve_path(root) for root in configured_auto_roots]
+    elif directories:
+        auto_roots = [_resolve_path(Path(directory)) for directory in directories]
+    else:
+        auto_roots = []
+
     manager = DiskWatcherManager()
 
-    if not directories:
-        suggestions = suggest_directories()
-        if not suggestions:
-            logger.error(
-                "No suitable directories found to monitor. Specify one manually."
-            )
-            return
-
-        for suggestion in suggestions:
-            logger.info(
-                "auto_detected_directory",
-                extra={
-                    "directory": str(suggestion.path),
-                    "volume_id": suggestion.volume_id,
-                },
-            )
-            manager.add_directory(suggestion.path, uuid=suggestion.volume_id)
-    else:
+    if directories:
         for directory in directories:
             manager.add_directory(Path(directory).resolve())
+    else:
+        if auto_roots:
+            logger.info(
+                "Auto discovery only run",
+                extra={"roots": [str(root) for root in auto_roots]},
+            )
+        else:
+            suggestions = suggest_directories()
+            if not suggestions:
+                logger.error(
+                    "No suitable directories found to monitor. Specify one manually."
+                )
+                return
+
+            for suggestion in suggestions:
+                logger.info(
+                    "auto_detected_directory",
+                    extra={
+                        "directory": str(suggestion.path),
+                        "volume_id": suggestion.volume_id,
+                    },
+                )
+                manager.add_directory(suggestion.path, uuid=suggestion.volume_id)
+
+    max_scan_workers = _get_config_value("run.max_scan_workers")
+
+    if auto_roots:
+        logger.info(
+            "Auto-discovery roots configured",
+            extra={"roots": [str(root) for root in auto_roots]},
+        )
+
+        manager.enable_auto_discovery(
+            auto_roots,
+            scan_new=perform_scan,
+            max_workers=max_scan_workers,
+            start_thread=False,
+        )
 
     if perform_scan:
-        logger.info("Performing initial archival scan of monitored directories.")
-        for thread in manager.threads:
-            thread.watcher.archive_existing_files()
+        directory_count = len(manager.current_paths())
+        parallel = directory_count > 1
+        if parallel:
+            logger.info(
+                "Performing initial archival scan using multiprocessing.",
+                extra={
+                    "directories": directory_count,
+                    "parallel": True,
+                    "max_workers": max_scan_workers,
+                },
+            )
+        else:
+            logger.info(
+                "Performing initial archival scan of monitored directories.",
+                extra={
+                    "directories": directory_count,
+                    "parallel": False,
+                    "max_workers": 1,
+                },
+            )
+        manager.run_initial_scans(parallel=parallel, max_workers=max_scan_workers)
     else:
         logger.info("Skipping initial archival scan (run.auto_scan disabled).")
 
     manager.start_all()
+
+    if auto_roots:
+        manager.start_auto_discovery_thread()
 
     logger.info("Running... Press Ctrl+C to stop.")
     counter = 0
@@ -329,6 +398,7 @@ def status(
             events = query_events(conn, limit=limit)
             aggregates = summarize_by_volume(conn)
             volume_meta = fetch_volume_metadata(conn)
+            jobs = fetch_jobs(conn)
     except sqlite3.OperationalError:
         typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
         return
@@ -337,7 +407,7 @@ def status(
     combined_volumes = _attach_mount_details(combined_volumes)
 
     if as_json:
-        payload = {"events": events, "volumes": combined_volumes}
+        payload = {"events": events, "volumes": combined_volumes, "jobs": jobs}
         typer.echo(json.dumps(payload, indent=2))
         return
 
@@ -349,6 +419,29 @@ def status(
             typer.echo(
                 f"{event['timestamp']} | {event['event_type']:>8} | {event['volume_id']} | {event['path']}"
             )
+
+    if jobs:
+        typer.echo("\nActive jobs:")
+        for job in jobs:
+            progress = job.get("progress_json")
+            if progress:
+                try:
+                    progress_data = json.loads(progress)
+                except json.JSONDecodeError:
+                    progress_data = {}
+            else:
+                progress_data = {}
+            job_line = (
+                f"{job['job_id'][:8]} {job['job_type']} {job.get('status','')}"
+                f" {job.get('path') or job.get('volume_id','')}"
+            )
+            typer.echo(job_line)
+            if progress_data:
+                progress_fragments = ", ".join(
+                    f"{key}={value}" for key, value in progress_data.items() if key not in {"uuid", "path"}
+                )
+                if progress_fragments:
+                    typer.echo(f"    progress: {progress_fragments}")
 
     if combined_volumes:
         typer.echo("\nBy volume:")
