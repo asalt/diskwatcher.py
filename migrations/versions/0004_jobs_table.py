@@ -16,6 +16,14 @@ _DEF_VOLUME_INDEX = "idx_jobs_volume"
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    if "jobs" in existing_tables:
+        # Catalogs created from the static schema already include the jobs
+        # table and its indexes; skip creation in that case.
+        return
+
     op.create_table(
         "jobs",
         sa.Column("job_id", sa.Text(), primary_key=True, nullable=False),

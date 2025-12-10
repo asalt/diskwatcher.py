@@ -12,6 +12,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Some catalogs may have been created from the static schema before this
+    # migration was introduced, in which case the mount_* and lsblk_* columns
+    # already exist. Skip the ALTER TABLE statements when we detect that shape.
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    existing_columns = {col["name"] for col in inspector.get_columns("volumes")}
+    if "mount_device" in existing_columns:
+        return
+
     op.add_column("volumes", sa.Column("mount_device", sa.Text(), nullable=True))
     op.add_column("volumes", sa.Column("mount_point", sa.Text(), nullable=True))
     op.add_column("volumes", sa.Column("mount_uuid", sa.Text(), nullable=True))

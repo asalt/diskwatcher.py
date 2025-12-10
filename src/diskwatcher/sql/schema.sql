@@ -16,6 +16,7 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 CREATE TABLE IF NOT EXISTS volumes (
     volume_id TEXT PRIMARY KEY,
     directory TEXT NOT NULL,
+    label_index INTEGER,
     event_count INTEGER NOT NULL DEFAULT 0,
     created_count INTEGER NOT NULL DEFAULT 0,
     modified_count INTEGER NOT NULL DEFAULT 0,
