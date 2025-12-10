@@ -26,7 +26,7 @@ This installs the `diskwatcher` console entrypoint and the Python package.
 ### Monitor directories
 
 ```bash
-diskwatcher run /mnt/e /media/alex --log-level info
+diskwatcher --log-level info run /mnt/e /media/alex
 ```
 
 - If no directories are provided the CLI will try to auto-detect removable media.
@@ -105,6 +105,18 @@ diskwatcher dashboard --limit 15
 
 - Shows the most recently touched files with their volume, directory, and event counts.
 - Pass `--json` to feed the aggregated `files`/`volumes` payload into notebooks or dashboards.
+
+### Search cataloged paths
+
+```bash
+diskwatcher search "msfragger" --files --no-dirs --regex
+```
+
+- Finds files and/or directories whose recorded paths match a substring or regular expression.
+- Use `--files/--no-files` and `--dirs/--no-dirs` to control which sections are searched and displayed.
+- `--regex` treats the pattern as a regular expression; `--case-sensitive` / `--ignore-case` (or `-i`) control case handling.
+- File searches match basenames by default (similar to `find -name`); use `--wholename` or `--no-basename` to search against full stored paths instead.
+- `--iname` is a convenience alias for case-insensitive basename searches (`--basename --ignore-case`), mirroring `find -iname`.
 
 ### Stream live events
 

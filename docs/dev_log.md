@@ -1,4 +1,62 @@
 ---
+date: 2025-12-10T00:10:00Z
+task: "Align search flags with find semantics"
+branch: "main"
+agent: "gpt-5.1-codex"
+commit: "364c33b"
+tags: [cli, search]
+---
+
+**Summary.** Refined the `diskwatcher search` CLI to better mirror common `find` patterns by defaulting to basename matching, adding `--wholename` and `--iname` style aliases, and tightening case-sensitivity controls.
+
+**Highlights.**
+- Switched file searches to use a configurable `dw_match_pattern()` SQLite helper so substring/regex and case handling are centralized, while keeping directory aggregation intact (`src/diskwatcher/core/cli.py:1000`).
+- Added `-i` and `--ignore-case` shortcuts plus a `--iname` flag that behaves like a case-insensitive basename search, along with a `--wholename` alias for full-path matching (`src/diskwatcher/core/cli.py:970`).
+- Extended CLI tests to cover basename vs wholename, case-sensitive vs case-insensitive, and the new alias flags (`tests/test_cli.py:440`).
+
+**Challenges.**
+- Needed to rework the LIKE-based helpers into a custom SQL function without regressing existing search tests or JSON output shape.
+
+**Suggestions.**
+- Consider a dedicated section in the README that maps common `find` invocations to equivalent `diskwatcher search` commands for operators.
+
+**Score.**
+Novelty: medium
+Importance: medium
+Difficulty: low
+
+**Signature.** @gpt-5.1-codex
+
+---
+date: 2025-12-10T00:00:00Z
+task: "Tighten search matching for file basenames"
+branch: "main"
+agent: "gpt-5.1-codex"
+commit: "364c33b"
+tags: [cli, search]
+---
+
+**Summary.** Extended the `diskwatcher search` CLI so operators can choose whether patterns apply to full paths or just basenames, and wired tests/docs to clarify what `--files/--dirs` actually control.
+
+**Highlights.**
+- Added a `--basename/--no-basename` flag that routes file searches through a SQLite `dw_basename()` helper, ensuring `--regex` patterns like `msfragger` match filenames without being triggered by parent directory names (`src/diskwatcher/core/cli.py:682`).
+- Updated CLI tests to cover basename vs full-path matching and confirmed the new flag composes cleanly with `--files/--no-dirs` and JSON output (`tests/test_cli.py:140`).
+- Documented the search flow and the new flag in the README so catalog users understand how to target specific files during large archival sweeps (`README.md:60`).
+
+**Challenges.**
+- Needed to keep the SQL helper generic enough that existing LIKE-based substring searches continued to work while still supporting the regex-backed `dw_match_pattern()` path.
+
+**Suggestions.**
+- Consider adding a `--volume` filter to `search` so large multi-rack catalogs can be scoped to a single drive without post-filtering JSON output.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @gpt-5.1-codex
+
+---
 date: 2025-09-28T06:12:56Z
 task: "Parallelize initial scans"
 branch: "main"

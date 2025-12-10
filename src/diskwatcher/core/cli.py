@@ -687,9 +687,17 @@ def _search_files(
     case_sensitive: bool,
     include_deleted: bool,
     limit: int,
+    basename: bool,
 ) -> List[Dict[str, Any]]:
     params: List[Any] = []
-    clause = _build_search_clause("path", pattern, regex=regex, case_sensitive=case_sensitive, params=params)
+    column = "dw_basename(path)" if basename else "path"
+    clause = _build_search_clause(
+        column,
+        pattern,
+        regex=regex,
+        case_sensitive=case_sensitive,
+        params=params,
+    )
 
     where_parts = [clause]
     if not include_deleted:
@@ -751,14 +759,11 @@ def _build_search_clause(
     case_sensitive: bool,
     params: List[Any],
 ) -> str:
-    if regex:
-        return f"dw_match_pattern({column})"
-
-    like_pattern = _build_like_pattern(pattern)
-    params.append(like_pattern)
-    if case_sensitive:
-        return f"{column} LIKE ? ESCAPE '\\'"
-    return f"LOWER({column}) LIKE LOWER(?) ESCAPE '\\'"
+    # Matching is delegated to the dw_match_pattern SQLite function,
+    # which is configured per-search with the chosen substring/regex
+    # semantics and case-sensitivity. The params list is unused here
+    # but kept for signature compatibility.
+    return f"dw_match_pattern({column})"
 
 
 def _build_like_pattern(pattern: str) -> str:
@@ -1004,7 +1009,31 @@ def search(
     files: bool = typer.Option(True, "--files/--no-files", help="Include files in the results."),
     directories: bool = typer.Option(False, "--dirs/--no-dirs", help="Include directories in the results."),
     regex: bool = typer.Option(False, "--regex", help="Treat pattern as a regular expression."),
-    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Match with case sensitivity."),
+    case_sensitive: bool = typer.Option(
+        True,
+        "--case-sensitive/--ignore-case",
+        help="Match with case sensitivity (use --ignore-case for case-insensitive matching).",
+    ),
+    ignore_case_short: bool = typer.Option(
+        False,
+        "-i",
+        help="Shortcut for --ignore-case (case-insensitive matching, similar to find -i).",
+    ),
+    iname: bool = typer.Option(
+        False,
+        "--iname",
+        help="Alias for case-insensitive basename search (like find -iname).",
+    ),
+    basename: bool = typer.Option(
+        True,
+        "--basename/--no-basename",
+        help="Match file basenames by default; disable to search full paths.",
+    ),
+    wholename: bool = typer.Option(
+        False,
+        "--wholename",
+        help="Match against full stored paths (alias for --no-basename, similar to find -wholename).",
+    ),
     include_deleted: bool = typer.Option(False, "--include-deleted", help="Include deleted files in results."),
     limit: int = typer.Option(50, help="Maximum rows per section."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON payload instead of text."),
@@ -1014,6 +1043,15 @@ def search(
     if not files and not directories:
         raise typer.BadParameter("Enable files and/or directories to search.")
 
+    # Apply user-friendly aliases.
+    if ignore_case_short:
+        case_sensitive = False
+    if iname:
+        case_sensitive = False
+        basename = True
+    if wholename:
+        basename = False
+
     try:
         with init_db() as conn:
             conn.row_factory = sqlite3.Row
@@ -1021,16 +1059,36 @@ def search(
             if regex:
                 flags = 0 if case_sensitive else re.IGNORECASE
                 try:
-                    compiled = re.compile(pattern, flags)
+                    compiled_re = re.compile(pattern, flags)
                 except re.error as exc:
                     raise typer.BadParameter(f"Invalid regular expression: {exc}") from exc
 
                 def _match(value: Optional[str]) -> int:
-                    return int(bool(value and compiled.search(value)))
-
-                conn.create_function("dw_match_pattern", 1, _match)
+                    return int(bool(value and compiled_re.search(value)))
             else:
-                compiled = None
+                if case_sensitive:
+
+                    def _match(value: Optional[str]) -> int:
+                        return int(bool(value and pattern in value))
+                else:
+                    lowered = pattern.lower()
+
+                    def _match(value: Optional[str]) -> int:
+                        return int(bool(value and lowered in value.lower()))
+
+            conn.create_function("dw_match_pattern", 1, _match)
+
+            if basename:
+
+                def _basename(value: Optional[str]) -> Optional[str]:
+                    if value is None:
+                        return None
+                    try:
+                        return Path(value).name
+                    except Exception:
+                        return value
+
+                conn.create_function("dw_basename", 1, _basename)
 
             file_results = []
             dir_results = []
@@ -1039,17 +1097,18 @@ def search(
                 file_results = _search_files(
                     conn,
                     pattern,
-                    regex=bool(compiled),
+                    regex=regex,
                     case_sensitive=case_sensitive,
                     include_deleted=include_deleted,
                     limit=limit,
+                    basename=basename,
                 )
 
             if directories:
                 dir_results = _search_directories(
                     conn,
                     pattern,
-                    regex=bool(compiled),
+                    regex=regex,
                     case_sensitive=case_sensitive,
                     include_deleted=include_deleted,
                     limit=limit,

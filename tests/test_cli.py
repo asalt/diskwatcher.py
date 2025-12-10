@@ -474,6 +474,168 @@ def test_search_regex(monkeypatch, tmp_path):
     assert "beta001.log" in result.output
 
 
+def test_search_iname_alias(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    dir_match = tmp_path / "MSFRAGGER"
+    dir_match.mkdir()
+    file_in_dir = dir_match / "result1.txt"
+    file_in_dir.write_text("data")
+
+    file_name_match = tmp_path / "MsFrAgGeR_output.txt"
+    file_name_match.write_text("data")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_in_dir),
+            directory=str(dir_match),
+            volume_id="vol-search",
+        )
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_name_match),
+            directory=str(tmp_path),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+
+    # --iname should behave like a case-insensitive basename match.
+    result = runner.invoke(
+        app,
+        [
+            "search",
+            "msfragger",
+            "--iname",
+            "--no-dirs",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert str(file_name_match) in result.output
+    assert str(file_in_dir) not in result.output
+
+
+def test_search_ignore_case_short(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    file_path = tmp_path / "Gamma.TXT"
+    file_path.write_text("gamma")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_path),
+            directory=str(tmp_path),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+
+    # Default search is case-sensitive; lower-case pattern should not match mixed-case filename.
+    default_result = runner.invoke(
+        app,
+        [
+            "search",
+            "gamma.txt",
+        ],
+    )
+    assert default_result.exit_code == 0
+    assert str(file_path) not in default_result.output
+
+    # -i toggles to case-insensitive matching.
+    ignore_case_result = runner.invoke(
+        app,
+        [
+            "search",
+            "gamma.txt",
+            "-i",
+        ],
+    )
+    assert ignore_case_result.exit_code == 0
+    assert str(file_path) in ignore_case_result.output
+
+
+def test_search_regex_basename(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    dir_match = tmp_path / "msfragger"
+    dir_match.mkdir()
+    file_in_dir = dir_match / "result1.txt"
+    file_in_dir.write_text("data")
+
+    file_name_match = tmp_path / "msfragger_output.txt"
+    file_name_match.write_text("data")
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_in_dir),
+            directory=str(dir_match),
+            volume_id="vol-search",
+        )
+        log_event(
+            conn,
+            event_type="created",
+            path=str(file_name_match),
+            directory=str(tmp_path),
+            volume_id="vol-search",
+        )
+
+    runner = CliRunner()
+
+    # Default regex search matches only the file whose basename contains the pattern.
+    default_result = runner.invoke(
+        app,
+        [
+            "search",
+            "msfragger",
+            "--regex",
+            "--no-dirs",
+        ],
+    )
+    assert default_result.exit_code == 0
+    assert str(file_name_match) in default_result.output
+    assert str(file_in_dir) not in default_result.output
+
+    # Full-path search matches both the directory segment and the filename.
+    path_result = runner.invoke(
+        app,
+        [
+            "search",
+            "msfragger",
+            "--regex",
+            "--no-dirs",
+            "--no-basename",
+        ],
+    )
+
+    assert path_result.exit_code == 0
+    assert str(file_in_dir) in path_result.output
+    assert str(file_name_match) in path_result.output
+
+    # --wholename is an alias for full-path matching.
+    wholename_result = runner.invoke(
+        app,
+        [
+            "search",
+            "msfragger",
+            "--regex",
+            "--no-dirs",
+            "--wholename",
+        ],
+    )
+
+    assert wholename_result.exit_code == 0
+    assert str(file_in_dir) in wholename_result.output
+    assert str(file_name_match) in wholename_result.output
+
+
 def test_stream_outputs_new_events(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
 
