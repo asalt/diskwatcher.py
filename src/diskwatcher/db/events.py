@@ -81,6 +81,7 @@ def fetch_volume_metadata(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         SELECT
             volume_id,
             directory,
+            label_index,
             event_count,
             created_count,
             modified_count,
@@ -185,6 +186,43 @@ def query_events_since(
         (last_rowid, limit),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def ensure_volume_label_indices(conn: sqlite3.Connection) -> None:
+    """Assign stable, incremental label_index values to volumes lacking one.
+
+    Existing label_index values are preserved; new volumes are assigned
+    indices greater than the current maximum. This helper is intended for
+    use by tooling that prepares label exports.
+    """
+
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(label_index), 0) AS max_idx FROM volumes")
+    row = cur.fetchone()
+    max_idx = int(row["max_idx"]) if row and row["max_idx"] is not None else 0
+
+    cur.execute(
+        """
+        SELECT volume_id
+        FROM volumes
+        WHERE label_index IS NULL
+        ORDER BY (last_event_timestamp IS NULL), last_event_timestamp, volume_id
+        """
+    )
+    pending = cur.fetchall()
+    if not pending:
+        return
+
+    next_idx = max_idx + 1
+    for record in pending:
+        volume_id = record["volume_id"]
+        _execute_with_retry(
+            conn,
+            "UPDATE volumes SET label_index = ? WHERE volume_id = ?",
+            (next_idx, volume_id),
+        )
+        next_idx += 1
 
 
 def _update_volume_metadata(

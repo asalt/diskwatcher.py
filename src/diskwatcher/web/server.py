@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 from diskwatcher.db import (
     fetch_jobs,
@@ -15,6 +15,7 @@ from diskwatcher.db import (
     query_events,
     summarize_by_volume,
 )
+from diskwatcher.utils.labels import build_label_rows
 
 
 def _combine_volume_data(
@@ -94,6 +95,46 @@ def create_app(*, refresh_seconds: int = 5, event_limit: int = 25) -> Flask:
             "events": events,
             "volumes": volumes,
             "jobs": jobs,
+        }
+        return jsonify(payload)
+
+    @app.route("/api/volumes")
+    def volumes_api() -> Any:
+        """Return volume metadata rows suitable for remote agents."""
+        with init_db() as conn:
+            records = fetch_volume_metadata(conn)
+
+        rows = build_label_rows(records)
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "volumes": rows,
+        }
+        return jsonify(payload)
+
+    @app.route("/api/volumes/by-path")
+    def volume_by_path_api() -> Any:
+        """Return a single volume row matching the given directory path."""
+        path = request.args.get("path")
+        if not path:
+            return jsonify({"error": "Missing 'path' query parameter"}), 400
+
+        with init_db() as conn:
+            records = fetch_volume_metadata(conn)
+
+        matched: List[Dict[str, Any]] = []
+        for record in records:
+            directory = record.get("directory")
+            if directory and str(directory) == path:
+                matched.append(record)
+
+        if not matched:
+            return jsonify({"error": "No volume found for path", "path": path}), 404
+
+        rows = build_label_rows(matched)
+        # We expect a single row; return the first for convenience.
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "volume": rows[0],
         }
         return jsonify(payload)
 

@@ -54,3 +54,43 @@ def test_dashboard_routes(temp_catalog):
     body = resp_html.get_data(as_text=True)
     assert "DiskWatcher Dashboard" in body
     assert "Active Jobs" in body
+
+
+def test_volumes_api(temp_catalog):
+    app = create_app(refresh_seconds=1, event_limit=5)
+    client = app.test_client()
+
+    resp = client.get("/api/volumes")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert "volumes" in payload
+    volumes = payload["volumes"]
+    assert isinstance(volumes, list)
+    assert any(v["volume_id"] == "vol-web" for v in volumes)
+    first = volumes[0]
+    assert "label_index" in first
+    assert "human_id" in first
+    assert "volume_id" in first
+
+
+def test_volume_by_path_api(temp_catalog):
+    app = create_app(refresh_seconds=1, event_limit=5)
+    client = app.test_client()
+
+    # temp_catalog fixture logged a single volume with directory=temp_catalog.parent
+    # (the tmp_path used in the test).
+    base_dir = str(Path(temp_catalog).parent)
+
+    resp = client.get("/api/volumes/by-path", query_string={"path": base_dir})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert "volume" in payload
+    volume = payload["volume"]
+    assert volume["volume_id"] == "vol-web"
+
+    # Unknown path returns 404.
+    resp_not_found = client.get(
+        "/api/volumes/by-path",
+        query_string={"path": "/nonexistent/path/for/diskwatcher"},
+    )
+    assert resp_not_found.status_code == 404

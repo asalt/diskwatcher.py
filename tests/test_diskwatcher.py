@@ -12,6 +12,7 @@ from pathlib import Path
 import diskwatcher.db.connection as db_connection
 from diskwatcher.core.manager import DiskWatcherManager, _AutoDiscoveryThread
 from diskwatcher.core.watcher import DiskWatcher, DiskWatcherThread
+from watchdog.observers import Observer
 from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileDeletedEvent
 
 from diskwatcher.db import create_schema, query_events, init_db
@@ -116,6 +117,66 @@ def test_file_create_triggers_event_manualthread(tmp_path, caplog):
     thread.join()
 
     assert "File created" in caplog.text
+
+
+def test_watcher_falls_back_to_polling_on_enospc(monkeypatch, tmp_path, temp_db, caplog):
+    calls = {"observer": 0, "polling": 0}
+
+    class FailingObserver:
+        def __init__(self, *args, **kwargs):
+            calls["observer"] += 1
+
+        def schedule(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            import errno
+
+            raise OSError(errno.ENOSPC, "inotify watch limit reached")
+
+        def stop(self):
+            pass
+
+        def join(self):
+            pass
+
+    class DummyPollingObserver:
+        def __init__(self, *args, **kwargs):
+            calls["polling"] += 1
+
+        def schedule(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr("diskwatcher.core.watcher.Observer", FailingObserver, raising=False)
+    monkeypatch.setattr(
+        "watchdog.observers.polling.PollingObserver", DummyPollingObserver, raising=False
+    )
+
+    watcher = DiskWatcher(str(tmp_path), conn=temp_db)
+    stop_event = threading.Event()
+
+    with caplog.at_level(logging.WARNING):
+        thread = threading.Thread(
+            target=watcher.start, kwargs={"stop_event": stop_event}, daemon=True
+        )
+        thread.start()
+        time.sleep(0.2)
+        stop_event.set()
+        thread.join()
+
+    # We attempted to create a normal Observer and then fell back to polling.
+    assert calls["observer"] == 1
+    assert calls["polling"] == 1
+    assert "watcher_inotify_limit_reached" in caplog.text
 
 
 def test_file_create_triggers_event(tmp_path, temp_db):

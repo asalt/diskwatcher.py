@@ -27,7 +27,13 @@ def _normalize_sqlite_path(raw: str) -> Path:
 
 
 class DiskWatcherManager:
-    def __init__(self, conn: Optional[sqlite3.Connection] = None):
+    def __init__(
+        self,
+        conn: Optional[sqlite3.Connection] = None,
+        *,
+        polling_interval: Optional[int] = None,
+        exclude_patterns: Optional[Iterable[str]] = None,
+    ):
         self._owns_connection = conn is None
         self.conn = conn or init_db()
         self.conn_lock = Lock() if self.conn else None
@@ -35,6 +41,8 @@ class DiskWatcherManager:
         self._threads_lock = Lock()
         self._running = False
         self._auto_discovery: Optional[_AutoDiscoveryThread] = None
+        self._polling_interval = polling_interval
+        self._exclude_patterns = list(exclude_patterns) if exclude_patterns else []
 
     def add_directory(self, path: Path, uuid: Optional[str] = None):
         path = path.resolve()
@@ -62,6 +70,8 @@ class DiskWatcherManager:
             uuid,
             conn=self.conn,
             conn_lock=self.conn_lock,
+            polling_interval=self._polling_interval,
+            exclude_patterns=self._exclude_patterns,
         )
         with self._threads_lock:
             self.threads.append(watcher_thread)

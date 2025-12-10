@@ -96,6 +96,24 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
+def _parse_string_list(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("Expected a JSON array of strings") from exc
+
+    if not isinstance(parsed, list):
+        raise ConfigError("Expected a JSON array of strings")
+
+    normalized: list[str] = []
+    for item in parsed:
+        if not isinstance(item, str):
+            raise ConfigError("List entries must be strings")
+        normalized.append(item)
+
+    return normalized
+
+
 def _parse_path_list(value: str) -> list[str]:
     try:
         parsed = json.loads(value)
@@ -176,6 +194,20 @@ OPTIONS: Dict[str, Option] = {
         default=4,
         description="Upper bound on parallel processes used during the initial archival scan.",
         value_type="integer",
+    ),
+    "run.polling_interval": Option(
+        key="run.polling_interval",
+        parser=_parse_positive_int,
+        default=30,
+        description="Polling interval in seconds when the inotify backend is unavailable.",
+        value_type="integer",
+    ),
+    "run.exclude_patterns": Option(
+        key="run.exclude_patterns",
+        parser=_parse_string_list,
+        default=[],
+        description="Glob-style path patterns to exclude from archival scans and live event logging.",
+        value_type="list",
     ),
 }
 

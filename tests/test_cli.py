@@ -388,6 +388,53 @@ def test_dashboard_handles_empty_catalog(monkeypatch, tmp_path):
     assert "No file activity recorded yet." in result.output
 
 
+def test_labels_export_csv(monkeypatch, tmp_path):
+    db_root = _patch_db(monkeypatch, tmp_path)
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "file_a.txt"),
+            directory=str(tmp_path),
+            volume_id="vol-a",
+        )
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "nested" / "file_b.txt"),
+            directory=str(tmp_path / "nested"),
+            volume_id="vol-b",
+        )
+
+    output = db_root / "labels.csv"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "labels",
+            str(output),
+            "--format",
+            "csv",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output.exists()
+
+    import csv
+
+    with output.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        assert "label_index" in fieldnames
+        assert "human_id" in fieldnames
+        assert "volume_id" in fieldnames
+        rows = list(reader)
+        volume_ids = {row["volume_id"] for row in rows}
+        assert {"vol-a", "vol-b"} == volume_ids
+
+
 def test_search_files_default(monkeypatch, tmp_path):
     _patch_db(monkeypatch, tmp_path)
 

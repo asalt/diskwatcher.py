@@ -1,3 +1,5 @@
+import errno
+import fnmatch
 import sqlite3
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -7,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock
-from typing import Any, Optional
+from typing import Any, Optional, Iterable
 
 from diskwatcher.db import init_db, log_event
 from diskwatcher.db.jobs import JobHandle
@@ -19,6 +21,11 @@ logger = get_logger(__name__)
 
 MOUNT_METADATA_INITIAL_REFRESH_SECONDS = 300
 MOUNT_METADATA_MAX_REFRESH_SECONDS = 3600
+
+# Design notes (watch scaling, intentionally deferred):
+# A) Use non-recursive observers plus our own os.walk to apply exclude_patterns before scheduling per-directory watches.
+# B) On Linux/inotify, subclass watchdog's InotifyEmitter to skip blacklisted dirs (e.g. __pycache__, .git, tmp) when adding watches.
+# We currently rely on recursive observers and a polling fallback when ENOSPC is hit instead of optimizing the watch set.
 
 
 def _metadata_complete(metadata: Optional[dict[str, Any]]) -> bool:
@@ -42,6 +49,8 @@ class DiskWatcher(FileSystemEventHandler):
         conn: Optional[sqlite3.Connection] = None,
         conn_lock: Optional[Lock] = None,
         log_to_db: bool = True,
+        polling_interval: Optional[int] = None,
+        exclude_patterns: Optional[Iterable[str]] = None,
     ):
         self.path = Path(path)
         self.conn = conn
@@ -54,6 +63,8 @@ class DiskWatcher(FileSystemEventHandler):
         self._mount_metadata_refreshed_at: float = 0.0
         self._mount_metadata_interval: float = MOUNT_METADATA_INITIAL_REFRESH_SECONDS
         self._next_mount_metadata_refresh: float = 0.0
+        self.polling_interval = float(polling_interval) if polling_interval is not None else 30.0
+        self.exclude_patterns = list(exclude_patterns) if exclude_patterns else []
 
         initial_metadata = self._refresh_mount_metadata(force=True)
         if uuid is None and initial_metadata:
@@ -81,6 +92,8 @@ class DiskWatcher(FileSystemEventHandler):
             self.log_event("deleted", event.src_path)
 
     def log_event(self, event_type: str, path: str):
+        if self._is_excluded(path):
+            return
         mount_metadata = self._refresh_mount_metadata()
         metadata_payload = dict(mount_metadata) if mount_metadata else None
         if metadata_payload is not None:
@@ -121,6 +134,15 @@ class DiskWatcher(FileSystemEventHandler):
                     mount_metadata=metadata_payload,
                 )
 
+    def _is_excluded(self, path: str) -> bool:
+        if not self.exclude_patterns:
+            return False
+        path_str = str(path)
+        for pattern in self.exclude_patterns:
+            if fnmatch.fnmatch(path_str, pattern):
+                return True
+        return False
+
     def start(
         self,
         recursive=True,
@@ -132,11 +154,39 @@ class DiskWatcher(FileSystemEventHandler):
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be a threading.Event or None")
 
-        observer = Observer()
-        observer.schedule(self, str(self.path), recursive=recursive)
+        observer = None
+        try:
+            observer = Observer()
+            observer.schedule(self, str(self.path), recursive=recursive)
+            logger.info(
+                "watcher_started",
+                extra={"volume_id": self.uuid, "path": str(self.path), "backend": "inotify"},
+            )
+            observer.start()
+        except OSError as exc:
+            # Fall back to a polling observer when the inotify watch limit
+            # is exhausted on the host. This avoids hard failures on large
+            # directory trees at the cost of extra I/O.
+            if exc.errno == errno.ENOSPC:
+                logger.warning(
+                    "watcher_inotify_limit_reached",
+                    extra={"path": str(self.path), "error": str(exc)},
+                )
+                try:
+                    from watchdog.observers.polling import PollingObserver
+                except Exception:  # pragma: no cover - defensive guard
+                    raise
 
-        logger.info(f"Watching {self.uuid} : {self.path}...")
-        observer.start()
+                timeout = self.polling_interval if self.polling_interval and self.polling_interval > 0 else 30.0
+                observer = PollingObserver(timeout=timeout)
+                observer.schedule(self, str(self.path), recursive=recursive)
+                logger.info(
+                    "watcher_started",
+                    extra={"volume_id": self.uuid, "path": str(self.path), "backend": "polling"},
+                )
+                observer.start()
+            else:
+                raise
 
         if job_tracker:
             job_tracker.update(status="running", progress={"path": str(self.path)})
@@ -149,8 +199,9 @@ class DiskWatcher(FileSystemEventHandler):
                 if run_once or (stop_event and stop_event.is_set()):
                     break
         finally:
-            observer.stop()
-            observer.join()
+            if observer is not None:
+                observer.stop()
+                observer.join()
             if job_tracker:
                 job_tracker.update(status="stopping")
 
@@ -257,9 +308,19 @@ class DiskWatcher(FileSystemEventHandler):
                         progress=dict(self.scan_stats),
                     )
                 return dict(self.scan_stats)
+            # Skip excluded directories from traversal.
+            dirs[:] = [
+                d for d in dirs if not self._is_excluded(Path(root) / d)
+            ]
+
+            if self._is_excluded(root):
+                continue
+
             directories_seen += 1
             for fname in files:
                 full = Path(root) / fname
+                if self._is_excluded(full):
+                    continue
                 self.log_event("existing", str(full))
                 files_scanned += 1
                 if files_scanned % 500 == 0:
@@ -330,8 +391,10 @@ class DiskWatcherThread(threading.Thread):
         self,
         path: Path,
         uuid: Optional[str] = None,
-        conn: Optional[sqlite3.Connection] = None,  # ⬅️ Optional shared SQLite connection
+        conn: Optional[sqlite3.Connection] = None,  # <- Optional shared SQLite connection
         conn_lock: Optional[Lock] = None,
+        polling_interval: Optional[int] = None,
+        exclude_patterns: Optional[Iterable[str]] = None,
     ):
         super().__init__(daemon=True)
         self.path = path.resolve()
@@ -345,8 +408,10 @@ class DiskWatcherThread(threading.Thread):
         self.watcher = DiskWatcher(
             str(self.path),
             uuid=self.uuid,
-            conn=self.conn,  # ⬅️ Pass shared connection
+            conn=self.conn,  # <- Pass shared connection
             conn_lock=self.conn_lock,
+            polling_interval=polling_interval,
+            exclude_patterns=exclude_patterns,
         )
         self.uuid = self.watcher.uuid
 

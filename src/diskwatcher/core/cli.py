@@ -16,7 +16,12 @@ from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils import config as config_utils
 from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
 from diskwatcher.utils.devices import get_mount_info
-from diskwatcher.db import init_db, query_events, fetch_jobs
+from diskwatcher.db import (
+    init_db,
+    query_events,
+    fetch_jobs,
+    ensure_volume_label_indices,
+)
 from diskwatcher.db.connection import DB_PATH, DB_DIR
 from diskwatcher.db.events import (
     summarize_by_volume,
@@ -25,6 +30,7 @@ from diskwatcher.db.events import (
     fetch_volume_metadata,
 )
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
+from diskwatcher.utils.labels import LABEL_EXPORT_COLUMNS, build_label_rows
 
 
 _LOG_LEVEL_CHOICES = {
@@ -148,12 +154,31 @@ def run(
         file_okay=False,
         resolve_path=True,
     ),
+    polling_interval: Optional[int] = typer.Option(
+        None,
+        "--polling-interval",
+        help="Polling interval in seconds when the inotify backend is unavailable (config key: run.polling_interval).",
+        metavar="SECONDS",
+    ),
+    exclude: Optional[List[str]] = typer.Option(
+        None,
+        "--exclude",
+        help="Glob-style path pattern to exclude from scans and live events (repeatable; config key: run.exclude_patterns).",
+        metavar="PATTERN",
+    ),
+    scan_only: bool = typer.Option(
+        False,
+        "--scan-only",
+        help="Perform the initial archival scan and exit without starting live watchers or auto-discovery.",
+    ),
 ) -> None:
     """Start monitoring a directory (defaults to auto-detected mount points)."""
     logger = get_logger(__name__)
 
     perform_scan = _get_config_value("run.auto_scan")
-    if scan is not None:
+    if scan_only:
+        perform_scan = True
+    elif scan is not None:
         perform_scan = scan
 
     def _resolve_path(candidate: Path) -> Path:
@@ -174,7 +199,22 @@ def run(
     else:
         auto_roots = []
 
-    manager = DiskWatcherManager()
+    polling_interval_cfg = _get_config_value("run.polling_interval")
+    exclude_patterns_cfg = _get_config_value("run.exclude_patterns")
+
+    effective_polling_interval = polling_interval if polling_interval is not None else polling_interval_cfg
+    if effective_polling_interval is not None and effective_polling_interval < 1:
+        raise typer.BadParameter("Polling interval must be at least 1 second.")
+
+    if exclude:
+        exclude_patterns = list(exclude)
+    else:
+        exclude_patterns = list(exclude_patterns_cfg) if exclude_patterns_cfg else []
+
+    manager = DiskWatcherManager(
+        polling_interval=effective_polling_interval,
+        exclude_patterns=exclude_patterns,
+    )
 
     if directories:
         for directory in directories:
@@ -205,7 +245,7 @@ def run(
 
     max_scan_workers = _get_config_value("run.max_scan_workers")
 
-    if auto_roots:
+    if auto_roots and not scan_only:
         logger.info(
             "Auto-discovery roots configured",
             extra={"roots": [str(root) for root in auto_roots]},
@@ -242,6 +282,10 @@ def run(
         manager.run_initial_scans(parallel=parallel, max_workers=max_scan_workers)
     else:
         logger.info("Skipping initial archival scan (run.auto_scan disabled).")
+
+    if scan_only:
+        logger.info("Scan-only mode enabled; exiting after archival sweep.")
+        return
 
     manager.start_all()
 
@@ -410,6 +454,91 @@ def log() -> None:
         typer.echo(LOG_FILE.read_text())
     else:
         typer.echo("No logs found.")
+
+
+def _write_labels_csv(path: Path, columns: List[str], rows: List[Dict[str, Any]]) -> None:
+    import csv
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([row.get(column, "") for column in columns])
+
+
+def _write_labels_xlsx(path: Path, columns: List[str], rows: List[Dict[str, Any]]) -> None:
+    try:
+        from openpyxl import Workbook  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError(
+            "openpyxl is required for XLSX export; install it with "
+            "'python -m pip install openpyxl' or use --format csv."
+        ) from exc
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Volumes"
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([row.get(column, "") for column in columns])
+    workbook.save(path)
+
+
+@app.command()
+def labels(
+    output: Path = typer.Argument(
+        ...,
+        exists=False,
+        dir_okay=False,
+        file_okay=True,
+        resolve_path=True,
+        help="Output .xlsx or .csv file for label printing.",
+    ),
+    fmt: Optional[str] = typer.Option(
+        None,
+        "--format",
+        "-f",
+        help="Output format: xlsx or csv (inferred from file extension when omitted).",
+    ),
+) -> None:
+    """Export tracked volumes to a spreadsheet suitable for label printers."""
+
+    try:
+        with init_db() as conn:
+            ensure_volume_label_indices(conn)
+            records = fetch_volume_metadata(conn)
+    except sqlite3.OperationalError:
+        typer.echo("Catalog is empty. Run `diskwatcher run` to start logging events.")
+        raise typer.Exit(code=1)
+
+    if not records:
+        typer.echo("No volumes recorded yet.")
+        raise typer.Exit(code=0)
+
+    rows = build_label_rows(records)
+    remaining_columns = [column for column in LABEL_EXPORT_COLUMNS if column != "mount_label"]
+    columns = ["label_index", "mount_label", "human_id"] + remaining_columns
+
+    target_format = (fmt or "").lower()
+    if not target_format:
+        suffix = output.suffix.lower()
+        if suffix == ".csv":
+            target_format = "csv"
+        else:
+            target_format = "xlsx"
+
+    try:
+        if target_format == "csv":
+            _write_labels_csv(output, columns, rows)
+        elif target_format == "xlsx":
+            _write_labels_xlsx(output, columns, rows)
+        else:
+            raise typer.BadParameter("Unsupported format. Choose 'csv' or 'xlsx'.")
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Wrote {len(rows)} volume labels to {output} ({target_format}).")
 
 
 @app.command()

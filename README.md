@@ -39,6 +39,12 @@ diskwatcher --log-level info run /mnt/e /media/alex
   catalogs independently before its watcher thread starts tailing live events.
   Tune the cap with `diskwatcher config set run.max_scan_workers <N>` if racks
   host more (or fewer) disks than the default concurrency can accommodate.
+- If the Linux inotify watch limit is reached for a volume, DiskWatcher now falls
+  back to a polling backend for that directory (configurable via
+  `run.polling_interval`); consider raising `fs.inotify.max_user_watches` on
+  hosts that track very deep trees.
+- Use `--exclude PATTERN` (or `diskwatcher config set run.exclude_patterns '["*/tmp/*"]'`)
+  to skip noisy or low-value paths during the initial scan and live event logging.
 - To auto-load devices that appear beneath a known root (for example `/media`),
   add it with `diskwatcher config set run.auto_discover_roots '["/media"]'` or
   pass `--discover-root /media` to `diskwatcher run`; DiskWatcher will start a
@@ -117,6 +123,16 @@ diskwatcher search "msfragger" --files --no-dirs --regex
 - `--regex` treats the pattern as a regular expression; `--case-sensitive` / `--ignore-case` (or `-i`) control case handling.
 - File searches match basenames by default (similar to `find -name`); use `--wholename` or `--no-basename` to search against full stored paths instead.
 - `--iname` is a convenience alias for case-insensitive basename searches (`--basename --ignore-case`), mirroring `find -iname`.
+
+### Export volume labels
+
+```bash
+diskwatcher labels volumes.xlsx
+```
+
+- Exports tracked volumes to a spreadsheet suitable for label printers (default XLSX, infered from extension).
+- Columns include a stable `label_index`, a derived `human_id` built from PARTUUID/PTUUID/UUID/volume_id, and core identity fields (volume ID, directory, mount label/UUID/device, model/serial/vendor, PTUUID/PARTUUID/WWN, and size/usage bytes).
+- Use `--format csv` to write a plain CSV instead, or change the extension to `.csv` to infer the format automatically.
 
 ### Stream live events
 

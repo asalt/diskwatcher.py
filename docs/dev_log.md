@@ -28,6 +28,35 @@ Difficulty: low
 **Signature.** @gpt-5.1-codex
 
 ---
+date: 2025-12-10T00:20:00Z
+task: "Add volume label export helper"
+branch: "main"
+agent: "gpt-5.1-codex"
+commit: "364c33b"
+tags: [cli, export]
+---
+
+**Summary.** Introduced a `diskwatcher labels` command that exports the volumes table into CSV/XLSX so lab operators can feed drive identity fields straight into label printers like the Brady BMP51.
+
+**Highlights.**
+- Added a small label row builder that stamps each volume with a stable `label_index` and pulls core identity columns (volume ID, directory, mount label/UUID/device, model/serial/vendor, and usage bytes) (`src/diskwatcher/core/cli.py:424`).
+- Implemented CSV and XLSX writers with lazy `openpyxl` import plus clear fallbacks, and covered the CSV path with a focused CLI test (`tests/test_cli.py:430`).
+- Documented the new `labels` command and example usage in the README so operators can quickly generate spreadsheets for their label templates (`README.md:120`).
+
+**Challenges.**
+- Balancing a rich enough column set for experimentation with keeping the export format stable and easy to post-process in external tools.
+
+**Suggestions.**
+- Consider adding simple column presets (e.g. `--preset short-id`, `--preset forensic`) once real-world label layouts settle.
+
+**Score.**
+Novelty: medium
+Importance: medium
+Difficulty: low
+
+**Signature.** @gpt-5.1-codex
+
+---
 date: 2025-12-10T00:00:00Z
 task: "Tighten search matching for file basenames"
 branch: "main"
