@@ -133,10 +133,16 @@ class DiskWatcherManager:
                 lock=self.conn_lock,
             )
 
-        if not parallel or len(target_threads) == 1:
+        if not parallel:
+            targets = ", ".join(f"{thread.path} (volume={thread.uuid})" for thread in target_threads)
             logger.info(
-                "initial_scan_serial",
-                extra={"directories": len(target_threads)},
+                "initial_scan_serial directories=%d targets=%s",
+                len(target_threads),
+                targets,
+                extra={
+                    "directories": len(target_threads),
+                    "targets": [{"path": str(thread.path), "volume_id": thread.uuid} for thread in target_threads],
+                },
             )
             results: List[Dict[str, Any]] = []
             for thread in target_threads:
@@ -157,14 +163,18 @@ class DiskWatcherManager:
         db_path = self._database_path()
         if self.conn:
             try:
-                self.conn.commit()
+                if self.conn_lock:
+                    with self.conn_lock:
+                        self.conn.commit()
+                else:
+                    self.conn.commit()
             except sqlite3.Error:
                 logger.debug("initial_scan_commit_failed", exc_info=True)
 
         worker_path = str(db_path) if db_path else None
         if worker_path is None:
             logger.warning(
-                "initial_scan_parallel_fallback",
+                "initial_scan_parallel_fallback reason=no_database_path",
                 extra={"reason": "no_database_path"},
             )
             return self.run_initial_scans(parallel=False, threads=target_threads)
@@ -176,13 +186,18 @@ class DiskWatcherManager:
             max_parallel = max(1, max_workers)
 
         desired_workers = min(len(target_threads), max_parallel)
+        targets = ", ".join(f"{thread.path} (volume={thread.uuid})" for thread in target_threads)
 
         logger.info(
-            "initial_scan_parallel_start",
+            "initial_scan_parallel_start directories=%d workers=%d targets=%s",
+            len(target_threads),
+            desired_workers,
+            targets,
             extra={
                 "directories": len(target_threads),
                 "workers": desired_workers,
                 "database": worker_path,
+                "targets": [{"path": str(thread.path), "volume_id": thread.uuid} for thread in target_threads],
             },
         )
 
@@ -208,7 +223,9 @@ class DiskWatcherManager:
                     stats = future.result()
                 except Exception as exc:  # pragma: no cover - defensive guard
                     logger.error(
-                        "initial_scan_failed",
+                        "initial_scan_failed path=%s error=%s",
+                        str(thread.path),
+                        str(exc),
                         extra={"path": str(thread.path), "error": str(exc)},
                     )
                     failure_stats = {
@@ -325,7 +342,8 @@ class DiskWatcherManager:
                 return False
 
         logger.info(
-            "auto_removed_directory",
+            "auto_removed_directory path=%s",
+            str(resolved),
             extra={"path": str(resolved)},
         )
         thread.stop()
@@ -395,6 +413,11 @@ class DiskWatcherManager:
         if thread and not thread.is_alive() and not thread.stopped():
             thread.start()
 
+    def set_auto_discovery_scan_new(self, enabled: bool) -> None:
+        thread = self._auto_discovery
+        if thread is not None:
+            thread.scan_new = enabled
+
     def _snapshot_threads(self) -> List[DiskWatcherThread]:
         with self._threads_lock:
             return list(self.threads)
@@ -454,18 +477,23 @@ class _AutoDiscoveryThread(Thread):
             new_threads.append(thread)
 
         if new_threads:
+            targets = ", ".join(f"{thread.path} (volume={thread.uuid})" for thread in new_threads)
             logger.info(
-                "auto_discovery_found",
+                "auto_discovery_found count=%d targets=%s",
+                len(new_threads),
+                targets,
                 extra={
                     "roots": [str(root) for root in self.roots],
                     "paths": [str(thread.path) for thread in new_threads],
+                    "targets": [
+                        {"path": str(thread.path), "volume_id": thread.uuid} for thread in new_threads
+                    ],
                 },
             )
 
             if self.scan_new:
-                parallel = len(new_threads) > 1
                 self.manager.run_initial_scans(
-                    parallel=parallel,
+                    parallel=True,
                     max_workers=self.max_workers,
                     threads=new_threads,
                 )

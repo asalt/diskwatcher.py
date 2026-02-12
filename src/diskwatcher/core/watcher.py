@@ -159,7 +159,10 @@ class DiskWatcher(FileSystemEventHandler):
             observer = Observer()
             observer.schedule(self, str(self.path), recursive=recursive)
             logger.info(
-                "watcher_started",
+                "watcher_started path=%s volume_id=%s backend=%s",
+                str(self.path),
+                self.uuid,
+                "inotify",
                 extra={"volume_id": self.uuid, "path": str(self.path), "backend": "inotify"},
             )
             observer.start()
@@ -181,7 +184,10 @@ class DiskWatcher(FileSystemEventHandler):
                 observer = PollingObserver(timeout=timeout)
                 observer.schedule(self, str(self.path), recursive=recursive)
                 logger.info(
-                    "watcher_started",
+                    "watcher_started path=%s volume_id=%s backend=%s",
+                    str(self.path),
+                    self.uuid,
+                    "polling",
                     extra={"volume_id": self.uuid, "path": str(self.path), "backend": "polling"},
                 )
                 observer.start()
@@ -274,7 +280,9 @@ class DiskWatcher(FileSystemEventHandler):
             job_tracker.update(status="running", progress=dict(self.scan_stats))
 
         logger.info(
-            "initial_scan_start",
+            "initial_scan_start root=%s volume_id=%s",
+            str(self.path),
+            self.uuid,
             extra={
                 "volume_id": self.uuid,
                 "root": str(self.path),
@@ -285,7 +293,11 @@ class DiskWatcher(FileSystemEventHandler):
         for root, dirs, files in os.walk(self.path):
             if interruptible and self.stop_event.is_set():
                 logger.info(
-                    "initial_scan_interrupted",
+                    "initial_scan_interrupted root=%s volume_id=%s files=%d dirs=%d",
+                    str(self.path),
+                    self.uuid,
+                    files_scanned,
+                    directories_seen,
                     extra={
                         "volume_id": self.uuid,
                         "root": str(self.path),
@@ -344,7 +356,12 @@ class DiskWatcher(FileSystemEventHandler):
 
         elapsed = time.time() - started_at
         logger.info(
-            "initial_scan_complete",
+            "initial_scan_complete root=%s volume_id=%s files=%d dirs=%d elapsed=%.2fs",
+            str(self.path),
+            self.uuid,
+            files_scanned,
+            directories_seen,
+            round(elapsed, 2),
             extra={
                 "volume_id": self.uuid,
                 "root": str(self.path),
