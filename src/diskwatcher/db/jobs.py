@@ -158,10 +158,9 @@ def fetch_jobs(
         query = "SELECT * FROM jobs ORDER BY updated_at DESC"
         params: tuple[Any, ...] = ()
     else:
-        query = (
-            "SELECT * FROM jobs WHERE status NOT IN (" "'complete', 'stopped', 'removed', 'cancelled'" ") "
-            "ORDER BY updated_at DESC"
-        )
+        # Active = not completed yet. `status` can be "failed"/"interrupted"/etc and still be
+        # complete, so rely on completed_at instead of a hard-coded list of statuses.
+        query = "SELECT * FROM jobs WHERE completed_at IS NULL ORDER BY updated_at DESC"
         params = ()
 
     if limit is not None:
@@ -170,6 +169,72 @@ def fetch_jobs(
 
     rows = conn.execute(query, params).fetchall()
     return [dict(row) for row in rows]
+
+
+def cleanup_stale_jobs(
+    conn: sqlite3.Connection,
+    *,
+    lock: Optional[Lock] = None,
+) -> int:
+    """Mark orphaned in-progress jobs as stale.
+
+    Jobs are owned by the PID/hostname recorded at creation time. If that PID
+    no longer exists on this host, the job cannot make further progress and
+    should be considered stale.
+
+    Returns the number of jobs marked stale.
+    """
+
+    hostname = socket.gethostname()
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT job_id, owner_pid
+        FROM jobs
+        WHERE completed_at IS NULL
+          AND owner_host = ?
+        """,
+        (hostname,),
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    marked = 0
+    for row in rows:
+        job_id = row["job_id"]
+        owner_pid = row["owner_pid"]
+        try:
+            pid = int(owner_pid) if owner_pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+
+        # If we can't interpret the pid, conservatively leave it alone.
+        if pid is None:
+            continue
+
+        # The current process owns its own jobs.
+        if pid == os.getpid():
+            continue
+
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            update_job(
+                conn,
+                job_id,
+                status="stale",
+                error="owner_pid_not_running",
+                completed=True,
+                lock=lock,
+            )
+            marked += 1
+        except PermissionError:
+            # If we cannot check, do not assume the job is stale.
+            continue
+
+    return marked
 
 
 @dataclass
@@ -257,4 +322,5 @@ __all__ = [
     "fail_job",
     "touch_job",
     "fetch_jobs",
+    "cleanup_stale_jobs",
 ]
