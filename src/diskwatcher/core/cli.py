@@ -1,11 +1,13 @@
 import json
 import logging
+import os
 import re
 import sys
 import time
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event, Lock, Thread
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, unquote
 
@@ -36,6 +38,7 @@ from diskwatcher.db.events import (
     query_events_since,
     fetch_volume_metadata,
 )
+from diskwatcher.db.jobs import cleanup_stale_jobs
 from diskwatcher.db.migration import upgrade as migrate_upgrade, build_alembic_config
 from diskwatcher.utils.labels import LABEL_EXPORT_COLUMNS, build_label_rows
 
@@ -86,6 +89,16 @@ _LSBLK_COLUMN_MAP = {
     "MAJ:MIN": "lsblk_maj_min",
 }
 
+_INITIAL_SCAN_FINAL_STATUSES = {
+    "complete",
+    "failed",
+    "interrupted",
+    "cancelled",
+    "removed",
+    "stopped",
+    "stale",
+}
+
 
 app = typer.Typer(help="DiskWatcher CLI - Monitor filesystem events.", no_args_is_help=True)
 config_app = typer.Typer(help="Inspect and edit DiskWatcher configuration.")
@@ -111,6 +124,347 @@ def _get_config_value(key: str) -> Any:
     except config_utils.ConfigError as exc:
         _emit_config_error(exc)
     raise AssertionError("unreachable")
+
+
+def _collect_initial_scan_progress(
+    conn: sqlite3.Connection,
+    started_at: str,
+    *,
+    owner_pid: Optional[str] = None,
+) -> Dict[str, int]:
+    """Aggregate initial scan progress for jobs created at/after started_at."""
+
+    try:
+        query = (
+            "SELECT status, completed_at, progress_json "
+            "FROM jobs "
+            "WHERE job_type = 'initial_scan' "
+            "AND started_at >= ?"
+        )
+        params: list[Any] = [started_at]
+        if owner_pid is not None:
+            query += " AND owner_pid = ?"
+            params.append(owner_pid)
+
+        rows = conn.execute(query, tuple(params)).fetchall()
+    except sqlite3.Error:
+        return {"total": 0, "completed": 0, "running": 0, "failed": 0, "files_scanned": 0}
+
+    total = len(rows)
+    completed = 0
+    failed = 0
+    files_scanned = 0
+
+    for status, completed_at, progress_json in rows:
+        if completed_at or status in _INITIAL_SCAN_FINAL_STATUSES:
+            completed += 1
+        if status == "failed":
+            failed += 1
+
+        if not progress_json:
+            continue
+        try:
+            payload = json.loads(progress_json)
+        except json.JSONDecodeError:
+            continue
+        files_value = payload.get("files_scanned")
+        if isinstance(files_value, (int, float)):
+            files_scanned += max(0, int(files_value))
+
+    running = max(total - completed, 0)
+    return {
+        "total": total,
+        "completed": completed,
+        "running": running,
+        "failed": failed,
+        "files_scanned": files_scanned,
+    }
+
+
+def _render_initial_scan_line(progress: Dict[str, int], tick: int) -> str:
+    total = progress["total"]
+    completed = progress["completed"]
+    running = progress["running"]
+    failed = progress["failed"]
+    files_scanned = progress["files_scanned"]
+
+    if total <= 0:
+        spinner = "|/-\\"[tick % 4]
+        return f"initial scan {spinner} preparing jobs..."
+
+    width = 24
+    ratio = completed / total if total else 0.0
+    filled = min(width, max(0, int(width * ratio)))
+    bar = "#" * filled + "-" * (width - filled)
+    spinner = "|/-\\"[tick % 4]
+    return (
+        f"initial scan {spinner} [{bar}] {completed}/{total} drives"
+        f" | files={files_scanned:,} | active={running} | failed={failed}"
+    )
+
+
+def _monitor_initial_scan_progress(
+    conn: sqlite3.Connection,
+    started_at: str,
+    stop_event: Event,
+    conn_lock: Optional[Lock] = None,
+    *,
+    interval: float = 0.5,
+    owner_pid: Optional[str] = None,
+) -> None:
+    """Render a lightweight live progress line while initial scans are running."""
+
+    stream = sys.stderr
+    interactive = stream.isatty()
+    last_progress: Optional[Dict[str, int]] = None
+    next_non_tty_emit = time.monotonic()
+
+    last_len = 0
+    tick = 0
+
+    tqdm_bar = None
+    if interactive:
+        try:
+            from tqdm import tqdm  # type: ignore
+
+            tqdm_bar = tqdm(
+                total=0,
+                desc="initial scan",
+                unit="drive",
+                dynamic_ncols=True,
+                leave=True,
+            )
+        except Exception:
+            tqdm_bar = None
+
+    def _snapshot() -> Dict[str, int]:
+        if conn_lock:
+            with conn_lock:
+                return _collect_initial_scan_progress(conn, started_at, owner_pid=owner_pid)
+        return _collect_initial_scan_progress(conn, started_at, owner_pid=owner_pid)
+
+    def _emit(progress: Dict[str, int], *, final: bool = False) -> None:
+        nonlocal last_len, next_non_tty_emit
+        nonlocal tqdm_bar
+
+        if tqdm_bar is not None:
+            total = progress["total"]
+            completed = progress["completed"]
+            if tqdm_bar.total != total:
+                tqdm_bar.total = total
+            if completed < tqdm_bar.n:
+                tqdm_bar.n = completed
+            else:
+                tqdm_bar.update(completed - tqdm_bar.n)
+            tqdm_bar.set_postfix(
+                files=f"{progress['files_scanned']:,}",
+                active=progress["running"],
+                failed=progress["failed"],
+                refresh=False,
+            )
+            tqdm_bar.refresh()
+            if final:
+                tqdm_bar.close()
+            return
+
+        line = _render_initial_scan_line(progress, tick)
+        if interactive:
+            padded = line + (" " * max(last_len - len(line), 0))
+            suffix = "\n" if final else ""
+            stream.write(f"\r{padded}{suffix}")
+            stream.flush()
+            last_len = len(line)
+            return
+
+        now = time.monotonic()
+        should_emit = final or progress != last_progress or now >= next_non_tty_emit
+        if should_emit:
+            stream.write(f"{line}\n")
+            stream.flush()
+            next_non_tty_emit = now + 2.0
+
+    # Render immediately so users see feedback even on short scans.
+    initial = _snapshot()
+    _emit(initial)
+    last_progress = initial
+
+    while not stop_event.wait(interval):
+        progress = _snapshot()
+        _emit(progress)
+        last_progress = progress
+        tick += 1
+
+    final_progress = _snapshot()
+    _emit(final_progress, final=True)
+
+
+def _monitor_initial_scan_batches(
+    conn: sqlite3.Connection,
+    stop_event: Event,
+    conn_lock: Optional[Lock] = None,
+    *,
+    owner_pid: Optional[str] = None,
+    interval: float = 0.5,
+) -> None:
+    """Watch for initial_scan jobs and render progress for each batch.
+
+    Auto-discovery can trigger new initial scans after the first startup scan,
+    so this monitor runs for the duration of `diskwatcher run` and only emits
+    output when scans are active.
+    """
+
+    stream = sys.stderr
+    interactive = stream.isatty()
+
+    last_progress: Optional[Dict[str, int]] = None
+    next_non_tty_emit = time.monotonic()
+
+    current_batch_started_at: Optional[str] = None
+    tick = 0
+    last_len = 0
+
+    tqdm_bar = None
+
+    def _create_tqdm_bar() -> None:
+        nonlocal tqdm_bar
+        if tqdm_bar is not None or not interactive:
+            return
+        try:
+            from tqdm import tqdm  # type: ignore
+
+            tqdm_bar = tqdm(
+                total=0,
+                desc="initial scan",
+                unit="drive",
+                dynamic_ncols=True,
+                leave=True,
+            )
+        except Exception:
+            tqdm_bar = None
+
+    def _close_tqdm_bar() -> None:
+        nonlocal tqdm_bar
+        if tqdm_bar is not None:
+            tqdm_bar.close()
+            tqdm_bar = None
+
+    def _active_batch_start() -> Optional[str]:
+        query = (
+            "SELECT MIN(started_at) FROM jobs "
+            "WHERE job_type = 'initial_scan' "
+            "AND completed_at IS NULL"
+        )
+        params: list[Any] = []
+        if owner_pid is not None:
+            query += " AND owner_pid = ?"
+            params.append(owner_pid)
+
+        if conn_lock:
+            with conn_lock:
+                row = conn.execute(query, tuple(params)).fetchone()
+        else:
+            row = conn.execute(query, tuple(params)).fetchone()
+        if not row:
+            return None
+        return row[0]
+
+    def _snapshot(started_at: str) -> Dict[str, int]:
+        if conn_lock:
+            with conn_lock:
+                return _collect_initial_scan_progress(conn, started_at, owner_pid=owner_pid)
+        return _collect_initial_scan_progress(conn, started_at, owner_pid=owner_pid)
+
+    def _emit(progress: Dict[str, int], *, final: bool = False) -> None:
+        nonlocal last_len, next_non_tty_emit
+        nonlocal tqdm_bar
+        nonlocal tick
+
+        if tqdm_bar is not None:
+            total = progress["total"]
+            completed = progress["completed"]
+            if tqdm_bar.total != total:
+                tqdm_bar.total = total
+            if completed < tqdm_bar.n:
+                tqdm_bar.n = completed
+            else:
+                tqdm_bar.update(completed - tqdm_bar.n)
+            tqdm_bar.set_postfix(
+                files=f"{progress['files_scanned']:,}",
+                active=progress["running"],
+                failed=progress["failed"],
+                refresh=False,
+            )
+            tqdm_bar.refresh()
+            if final:
+                _close_tqdm_bar()
+            return
+
+        line = _render_initial_scan_line(progress, tick)
+        if interactive:
+            padded = line + (" " * max(last_len - len(line), 0))
+            suffix = "\n" if final else ""
+            stream.write(f"\r{padded}{suffix}")
+            stream.flush()
+            last_len = len(line)
+            return
+
+        now = time.monotonic()
+        should_emit = final or progress != last_progress or now >= next_non_tty_emit
+        if should_emit:
+            stream.write(f"{line}\n")
+            stream.flush()
+            next_non_tty_emit = now + 2.0
+
+    while not stop_event.wait(interval):
+        active_start = _active_batch_start()
+
+        if active_start is None:
+            if current_batch_started_at is not None:
+                final_progress = _snapshot(current_batch_started_at)
+                _emit(final_progress, final=True)
+                current_batch_started_at = None
+                last_progress = None
+                tick = 0
+                last_len = 0
+            continue
+
+        if current_batch_started_at is None:
+            current_batch_started_at = active_start
+            _create_tqdm_bar()
+
+        progress = _snapshot(current_batch_started_at)
+        _emit(progress)
+        last_progress = progress
+        tick += 1
+
+    if current_batch_started_at is not None:
+        final_progress = _snapshot(current_batch_started_at)
+        _emit(final_progress, final=True)
+    else:
+        _close_tqdm_bar()
+
+
+def _render_initial_scan_target_line(entry: Dict[str, Any]) -> str:
+    path = entry.get("path") or "-"
+    volume_id = entry.get("uuid") or "-"
+    return f"- {path} (volume={volume_id})"
+
+
+def _render_initial_scan_result_line(result: Dict[str, Any]) -> str:
+    path = result.get("path") or "-"
+    volume_id = result.get("uuid") or "-"
+    status = result.get("status") or "unknown"
+    files_scanned = int(result.get("files_scanned") or 0)
+    directories_seen = int(result.get("directories_seen") or 0)
+    elapsed_value = result.get("elapsed_seconds")
+    if isinstance(elapsed_value, (int, float)):
+        elapsed = f"{float(elapsed_value):.1f}s"
+    else:
+        elapsed = "-"
+    return (
+        f"- {path} (volume={volume_id}) status={status}"
+        f" files={files_scanned:,} dirs={directories_seen:,} elapsed={elapsed}"
+    )
 
 
 @app.callback()
@@ -223,6 +577,12 @@ def run(
         exclude_patterns=exclude_patterns,
     )
 
+    # Prevent confusing "active" jobs from previous crashed runs.
+    try:
+        cleanup_stale_jobs(manager.conn, lock=manager.conn_lock)
+    except Exception:
+        logger.debug("stale_job_cleanup_failed", exc_info=True)
+
     if directories:
         for directory in directories:
             manager.add_directory(Path(directory).resolve())
@@ -260,14 +620,36 @@ def run(
 
         manager.enable_auto_discovery(
             auto_roots,
-            scan_new=perform_scan,
+            scan_new=False,
             max_workers=max_scan_workers,
             start_thread=False,
         )
+        # Start discovery before the initial scan so newly mounted drives are
+        # detected even while the archival sweep is running.
+        manager.set_auto_discovery_scan_new(perform_scan)
+        manager.start_auto_discovery_thread()
+
+    progress_stop = Event()
+    progress_thread: Optional[Thread] = None
+    if perform_scan:
+        progress_thread = Thread(
+            target=_monitor_initial_scan_batches,
+            args=(manager.conn, progress_stop, manager.conn_lock),
+            kwargs={"owner_pid": str(os.getpid())},
+            daemon=True,
+        )
+        progress_thread.start()
 
     if perform_scan:
         directory_count = len(manager.current_paths())
         parallel = directory_count > 1
+        targets = manager.status()
+        if targets:
+            typer.echo("Initial scan targets:")
+            for entry in targets:
+                typer.echo(_render_initial_scan_target_line(entry))
+        else:
+            typer.echo("Initial scan targets: (none)")
         if parallel:
             logger.info(
                 "Performing initial archival scan using multiprocessing.",
@@ -286,17 +668,30 @@ def run(
                     "max_workers": 1,
                 },
             )
-        manager.run_initial_scans(parallel=parallel, max_workers=max_scan_workers)
+        scan_results: List[Dict[str, Any]] = []
+        try:
+            scan_results = manager.run_initial_scans(parallel=parallel, max_workers=max_scan_workers)
+        finally:
+            pass
+        if scan_results:
+            typer.echo("Initial scan results:")
+            for result in scan_results:
+                typer.echo(_render_initial_scan_result_line(result))
     else:
         logger.info("Skipping initial archival scan (run.auto_scan disabled).")
 
     if scan_only:
         logger.info("Scan-only mode enabled; exiting after archival sweep.")
+        progress_stop.set()
+        if progress_thread is not None:
+            progress_thread.join(timeout=2.0)
+        manager.stop_all()
         return
 
     manager.start_all()
 
     if auto_roots:
+        manager.set_auto_discovery_scan_new(perform_scan)
         manager.start_auto_discovery_thread()
 
     logger.info("Running... Press Ctrl+C to stop.")
@@ -312,6 +707,11 @@ def run(
                     extra={"status": status_snapshot, "uptime_seconds": counter},
                 )
     except KeyboardInterrupt:
+        pass
+    finally:
+        progress_stop.set()
+        if progress_thread is not None:
+            progress_thread.join(timeout=2.0)
         manager.stop_all()
 
     # watches = []
@@ -552,18 +952,22 @@ def labels(
         else:
             target_format = "xlsx"
 
+    output_path = output
+    if not output_path.suffix:
+        output_path = output_path.with_suffix(f".{target_format}")
+
     try:
         if target_format == "csv":
-            _write_labels_csv(output, columns, rows)
+            _write_labels_csv(output_path, columns, rows)
         elif target_format == "xlsx":
-            _write_labels_xlsx(output, columns, rows)
+            _write_labels_xlsx(output_path, columns, rows)
         else:
             raise typer.BadParameter("Unsupported format. Choose 'csv' or 'xlsx'.")
     except RuntimeError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(f"Wrote {len(rows)} volume labels to {output} ({target_format}).")
+    typer.echo(f"Wrote {len(rows)} volume labels to {output_path} ({target_format}).")
 
 
 @app.command()
@@ -574,6 +978,7 @@ def status(
     """Show a snapshot of recent catalog activity."""
     try:
         with init_db() as conn:
+            cleanup_stale_jobs(conn)
             events = query_events(conn, limit=limit)
             aggregates = summarize_by_volume(conn)
             volume_meta = fetch_volume_metadata(conn)

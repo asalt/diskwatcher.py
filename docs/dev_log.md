@@ -1,4 +1,189 @@
 ---
+date: 2026-02-12T22:50:15Z
+task: "Make hot-plug scans visible + clean up stale jobs"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, jobs]
+---
+
+**Summary.** Improved the operator experience when drives are unplugged/replugged during `diskwatcher run`. Initial-scan progress now reappears whenever auto-discovery kicks off new archival scans (not just at startup), and key log lines now include the drive path + volume in the message so they’re readable with the default `%(message)s` console formatter.
+
+**Highlights.**
+- Added a long-lived scan monitor that watches for active `initial_scan` jobs owned by the current run PID and renders a tqdm bar when available (`src/diskwatcher/core/cli.py`).
+- Made “active jobs” semantics rely on `completed_at` (so `failed`/`interrupted` jobs don’t look active forever) and added a PID-based stale-job cleanup helper (`src/diskwatcher/db/jobs.py`).
+- Called stale cleanup from both `diskwatcher run` and `diskwatcher status` to prevent confusing lingering jobs.
+- Updated scan/discovery/watcher log messages to include `path=` and `volume_id=` inline (`src/diskwatcher/core/manager.py`, `src/diskwatcher/core/watcher.py`).
+- Verified with full suite (`73 passed, 1 skipped`).
+
+**Challenges.**
+- Needed progress reporting that doesn’t estimate totals (file count unknown) and doesn’t fight with stdout logs.
+
+**Suggestions.**
+- Consider adding an optional “job TTL” policy (updated_at-based) for stale detection beyond PID checks.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
+date: 2026-02-12T21:32:33Z
+task: "Start auto-discovery during initial scan"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, concurrency]
+---
+
+**Summary.** Adjusted `diskwatcher run --discover-root ...` so the auto-discovery thread starts immediately (after the initial bootstrap scan), rather than only after the initial archival sweep finishes. This makes it possible to hot-plug a new drive during long initial scans and still have DiskWatcher notice it.
+
+**Highlights.**
+- `run()` now starts the auto-discovery thread before kicking off `run_initial_scans`, and enables scan-on-new based on `perform_scan` (`src/diskwatcher/core/cli.py`).
+- Auto-discovery scans now always use process mode (`parallel=True`) and `run_initial_scans` supports process scans even for a single drive (`src/diskwatcher/core/manager.py`).
+- Guarded the shared SQLite commit with `conn_lock` to reduce contention when discovery and scans overlap (`src/diskwatcher/core/manager.py`).
+- Verified with full suite (`73 passed, 1 skipped`).
+
+**Challenges.**
+- Needed to avoid a race where the discovery thread could run before `scan_new` was enabled, leaving a newly attached drive unscanned.
+- Kept changes minimal while improving operator expectations for hot-plug workflows.
+
+**Suggestions.**
+- Consider a dedicated scan queue/worker pool so discovery-triggered scans don’t block the discovery loop.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
+date: 2026-02-12T21:08:47Z
+task: "Show scan targets/results explicitly in run output"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, tests]
+---
+
+**Summary.** Added explicit scan target and per-drive completion lines to `diskwatcher run` so operators can immediately tell which mounts are being scanned and which finished first. This is printed regardless of structured logging extras, making startup behavior easier to read in normal terminal output.
+
+**Highlights.**
+- Added `_render_initial_scan_target_line` and `_render_initial_scan_result_line` helpers in `src/diskwatcher/core/cli.py`.
+- `run()` now prints `Initial scan targets:` before scanning and `Initial scan results:` after scan completion.
+- Added formatter tests in `tests/test_cli.py`.
+- Verified with full test suite (`73 passed, 1 skipped`).
+
+**Challenges.**
+- Needed to keep output concise while still surfacing enough fields (path, volume, status, file count, directories, elapsed).
+- Ensured scan result output stays stable even when some stats fields are missing.
+
+**Suggestions.**
+- Consider adding `--quiet-scan-summary` for users who prefer log-only output once this format settles.
+
+**Score.**
+Novelty: low
+Importance: high
+Difficulty: low
+
+**Signature.** @codex
+
+---
+date: 2026-02-12T20:49:11Z
+task: "Improve initial scan visibility and discovery startup flow"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, performance]
+---
+
+**Summary.** Refined `diskwatcher run` startup so initial scan progress is much more visible and auto-discovery bootstrap no longer kicks off redundant scan behavior. I added a robust progress renderer that writes to stderr, uses `tqdm` when installed, and still falls back to plain lines when unavailable.
+
+**Highlights.**
+- Updated scan progress monitor in `src/diskwatcher/core/cli.py` to render immediately and prefer stderr output.
+- Added optional `tqdm` integration without adding a hard dependency.
+- Introduced `set_auto_discovery_scan_new()` in `src/diskwatcher/core/manager.py` and switched bootstrap discovery to `scan_new=False`, then enabled scan-on-new right before the background discovery thread starts.
+- Re-ran full tests (`71 passed, 1 skipped`).
+
+**Challenges.**
+- Needed to balance progress updates with concurrent log output so both remain readable.
+- Avoided introducing scan duplication during startup while preserving current discovery semantics.
+
+**Suggestions.**
+- Consider a dedicated `diskwatcher progress` command for polling scan status independently of the run process output stream.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
+date: 2026-02-12T20:38:16Z
+task: "Add live initial-scan progress line in CLI"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, tests]
+---
+
+**Summary.** Added a lightweight live progress line during `diskwatcher run` initial archival scans so operators can see ongoing activity instead of waiting on sparse start/finish logs. The display is TTY-only and reads existing `jobs` progress payloads (`files_scanned`) without adding new dependencies.
+
+**Highlights.**
+- Implemented `_collect_initial_scan_progress`, `_render_initial_scan_line`, and `_monitor_initial_scan_progress` in `src/diskwatcher/core/cli.py`.
+- Wired `run()` to start/stop the monitor thread around `manager.run_initial_scans(...)` and print a single updating line with drive completion bar + file counts.
+- Added regression coverage in `tests/test_cli.py` for scan-progress aggregation logic.
+- Verified via full suite (`71 passed, 1 skipped`).
+
+**Challenges.**
+- Needed to keep output non-disruptive with existing logger lines while still giving live feedback in terminal sessions.
+- Ensured progress accounting ignores non-scan jobs and tolerates malformed JSON safely.
+
+**Suggestions.**
+- Consider exposing scan progress via a dedicated `--json` stream mode for machine-readable dashboards.
+
+**Score.**
+Novelty: medium
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
+date: 2026-02-12T20:29:20Z
+task: "Auto-append label export extensions"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "N/A"
+tags: [cli, ux, tests]
+---
+
+**Summary.** Updated `diskwatcher labels` so extensionless output names now get the correct suffix automatically (`.xlsx` by default, or `.csv` when `--format csv` is selected). This removes a small but frequent workflow paper-cut when operators type short names like `current` during quick labeling runs.
+
+**Highlights.**
+- Added suffix normalization in `src/diskwatcher/core/cli.py` so writes and completion messages use the resolved output path.
+- Added focused CLI tests in `tests/test_cli.py` for both extensionless CSV and extensionless default XLSX flows.
+- Re-ran the full suite to confirm no regressions (`70 passed, 1 skipped`).
+
+**Challenges.**
+- Kept tests independent from `openpyxl` availability by monkeypatching the XLSX writer in the new extensionless-default test.
+- Ensured output assertions verify that no extensionless file is created accidentally.
+
+**Suggestions.**
+- Consider documenting this UX behavior in README’s `labels` section so users know the extension can be omitted safely.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @codex
+
+---
 date: 2026-02-12T19:40:22Z
 task: "Speed up dashboard and status read paths"
 branch: "main"

@@ -8,8 +8,10 @@ from typing import Optional
 from typer.testing import CliRunner
 
 import diskwatcher.db.connection as db_connection
+import diskwatcher.core.cli as cli_module
 from diskwatcher.core.cli import app
 from diskwatcher.db import init_db, log_event
+from diskwatcher.db.jobs import create_job
 from diskwatcher.utils import config as config_utils
 import alembic.command
 import sqlite3
@@ -433,6 +435,136 @@ def test_labels_export_csv(monkeypatch, tmp_path):
         rows = list(reader)
         volume_ids = {row["volume_id"] for row in rows}
         assert {"vol-a", "vol-b"} == volume_ids
+
+
+def test_labels_adds_csv_extension_when_missing(monkeypatch, tmp_path):
+    db_root = _patch_db(monkeypatch, tmp_path)
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "file.txt"),
+            directory=str(tmp_path),
+            volume_id="vol-csv",
+        )
+
+    output_base = db_root / "labels_export"
+    output_csv = output_base.with_suffix(".csv")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "labels",
+            str(output_base),
+            "--format",
+            "csv",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_csv.exists()
+    assert not output_base.exists()
+    assert str(output_csv) in result.output
+
+
+def test_labels_adds_xlsx_extension_when_missing(monkeypatch, tmp_path):
+    db_root = _patch_db(monkeypatch, tmp_path)
+
+    with init_db() as conn:
+        log_event(
+            conn,
+            event_type="created",
+            path=str(tmp_path / "file.txt"),
+            directory=str(tmp_path),
+            volume_id="vol-xlsx",
+        )
+
+    captured = {}
+
+    def _fake_write_xlsx(path, columns, rows):
+        captured["path"] = path
+        path.write_text("stub")
+
+    monkeypatch.setattr("diskwatcher.core.cli._write_labels_xlsx", _fake_write_xlsx)
+
+    output_base = db_root / "current"
+    output_xlsx = output_base.with_suffix(".xlsx")
+    runner = CliRunner()
+    result = runner.invoke(app, ["labels", str(output_base)])
+
+    assert result.exit_code == 0
+    assert output_xlsx.exists()
+    assert not output_base.exists()
+    assert captured["path"] == output_xlsx
+    assert str(output_xlsx) in result.output
+
+
+def test_collect_initial_scan_progress(monkeypatch, tmp_path):
+    _patch_db(monkeypatch, tmp_path)
+
+    with init_db() as conn:
+        create_job(
+            conn,
+            job_type="initial_scan",
+            path=str(tmp_path / "disk-a"),
+            volume_id="vol-a",
+            status="running",
+            progress={"files_scanned": 1200},
+        )
+        create_job(
+            conn,
+            job_type="initial_scan",
+            path=str(tmp_path / "disk-b"),
+            volume_id="vol-b",
+            status="failed",
+            progress={"files_scanned": 340},
+        )
+        create_job(
+            conn,
+            job_type="watcher",
+            path=str(tmp_path / "disk-c"),
+            volume_id="vol-c",
+            status="running",
+            progress={"files_scanned": 999999},
+        )
+
+        progress = cli_module._collect_initial_scan_progress(
+            conn,
+            started_at="1970-01-01T00:00:00+00:00",
+        )
+
+    assert progress["total"] == 2
+    assert progress["completed"] == 1
+    assert progress["running"] == 1
+    assert progress["failed"] == 1
+    assert progress["files_scanned"] == 1540
+
+
+def test_render_initial_scan_target_line():
+    line = cli_module._render_initial_scan_target_line(
+        {"path": "/media/alex/DriveA", "uuid": "vol-drive-a"}
+    )
+    assert line == "- /media/alex/DriveA (volume=vol-drive-a)"
+
+
+def test_render_initial_scan_result_line():
+    line = cli_module._render_initial_scan_result_line(
+        {
+            "path": "/media/alex/DriveA",
+            "uuid": "vol-drive-a",
+            "status": "complete",
+            "files_scanned": 1250,
+            "directories_seen": 42,
+            "elapsed_seconds": 12.34,
+        }
+    )
+    assert "DriveA" in line
+    assert "volume=vol-drive-a" in line
+    assert "status=complete" in line
+    assert "files=1,250" in line
+    assert "dirs=42" in line
+    assert "elapsed=12.3s" in line
 
 
 def test_search_files_default(monkeypatch, tmp_path):
