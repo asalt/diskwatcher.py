@@ -1,4 +1,94 @@
 ---
+date: 2026-02-12T19:40:22Z
+task: "Speed up dashboard and status read paths"
+branch: "main"
+agent: "gpt-5-codex"
+commit: "70f2218"
+tags: [performance, db, web]
+---
+
+**Summary.** Reworked dashboard-facing read paths to avoid repeated heavy scans and writable migration checks. The CLI/dashboard summary helpers now prefer the derived `files` and `volumes` metadata tables, with a compatibility fallback to legacy `events` aggregation only when needed. I also switched the Flask dashboard snapshot to read-only catalog opens by default, with a safe fallback for first-run catalogs.
+
+**Highlights.**
+- Updated `summarize_by_volume` and `summarize_files` in `src/diskwatcher/db/events.py` to use metadata-first queries and retain backward compatibility.
+- Added dashboard-oriented indexes via `migrations/versions/0006_dashboard_summary_indexes.py` and synced `src/diskwatcher/sql/schema.sql`.
+- Changed `src/diskwatcher/web/server.py` to use `init_db_readonly()` for polling routes so refresh loops stop re-running migration checks.
+- Documented the fast-path behavior in `README.md`.
+- Verified with `pytest -q` (68 passed, 1 skipped).
+
+**Challenges.**
+- Preserving output shape while swapping query strategies required careful field parity in `src/diskwatcher/db/events.py`.
+- Needed a safe fallback for missing catalogs in `src/diskwatcher/web/server.py` so first-run UX did not regress.
+
+**Suggestions.**
+- Consider migrating additional read-only CLI commands (`status`, `dashboard`, `search`) to `init_db_readonly()` where practical.
+
+**Score.**
+Novelty: medium
+Importance: high
+Difficulty: medium
+
+**Signature.** @codex
+
+---
+date: 2026-01-11T16:27:21Z
+task: "Add read-only DB connection helper"
+branch: "main"
+agent: "gpt-5.2-codex"
+commit: "N/A"
+tags: [db, api, tests]
+---
+
+**Summary.** Added a first-class read-only SQLite connection helper so dashboards and external agents can safely query the catalog without risking schema writes or migrations. This complements using the existing Flask `/api/*` endpoints as the preferred “safe” integration surface.
+
+**Highlights.**
+- Implemented `init_db_readonly()` using SQLite URI `mode=ro`, and ensured it skips directory creation and schema/migration work (`src/diskwatcher/db/connection.py`).
+- Exported the helper via `diskwatcher.db` and documented both the web JSON endpoints and the read-only connection pattern in `README.md`.
+- Added focused tests verifying we don’t create missing paths and that write attempts fail under the read-only connection (`tests/test_connection.py`).
+
+**Challenges.**
+- Needed to avoid relying on filesystem permission bits for determinism; the tests validate read-only behavior via SQLite’s own `mode=ro` enforcement.
+
+**Suggestions.**
+- Consider a `--readonly` flag (or auto-fallback) for read-only CLI commands (`status`, `search`, `dashboard`) when running inside constrained agent sandboxes.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @gpt-5.2-codex
+
+---
+date: 2026-01-11T15:48:08Z
+task: "Harden log file fallback + surface active paths"
+branch: "main"
+agent: "gpt-5.2-codex"
+commit: "N/A"
+tags: [logging, cli, tests]
+---
+
+**Summary.** Made file logging more robust for sandboxed/agent runs by tracking the runtime-selected log location and surfacing it through the CLI. This prevents confusing “permission denied” situations from silently hiding logs when `~/.diskwatcher` is not writable.
+
+**Highlights.**
+- Added `active_log_dir()` / `active_log_file()` and included `log_dir_active` / `log_file_active` in `diskwatcher config show --json` (`src/diskwatcher/utils/logging.py`, `src/diskwatcher/core/cli.py`).
+- Updated `diskwatcher log` to read from the active log file first and to handle unreadable paths with a clear error instead of failing hard (`src/diskwatcher/core/cli.py`).
+- Documented the fallback location (`./.diskwatcher_logs/diskwatcher.log`) in the README and added deterministic tests that simulate `PermissionError` via `logging.FileHandler` monkeypatching (`README.md`, `tests/test_logging.py`).
+
+**Challenges.**
+- Needed test coverage that didn’t rely on filesystem permission bits (which can behave differently under CI/root), so the fallback path is exercised by patching the handler constructor.
+
+**Suggestions.**
+- Consider adding a `log.dir` config key (or env var) and a read-only DB connection helper for external agents before investing in a full API layer.
+
+**Score.**
+Novelty: low
+Importance: medium
+Difficulty: low
+
+**Signature.** @gpt-5.2-codex
+
+---
 date: 2025-12-10T00:10:00Z
 task: "Align search flags with find semantics"
 branch: "main"
