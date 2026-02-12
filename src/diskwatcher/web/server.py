@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple, List
 
@@ -12,6 +14,7 @@ from diskwatcher.db import (
     fetch_jobs,
     fetch_volume_metadata,
     init_db,
+    init_db_readonly,
     query_events,
     summarize_by_volume,
 )
@@ -56,12 +59,33 @@ def _normalize_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
+@contextmanager
+def _open_catalog() -> Any:
+    """Open the catalog in read-only mode, falling back when absent."""
+
+    try:
+        conn = init_db_readonly()
+    except sqlite3.OperationalError:
+        # First-run catalogs may not exist yet; create/open in writable mode.
+        with init_db() as writable_conn:
+            yield writable_conn
+        return
+
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _snapshot(limit: int = 25) -> Tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    with init_db() as conn:
-        events = query_events(conn, limit=limit)
-        aggregates = summarize_by_volume(conn)
-        volume_meta = fetch_volume_metadata(conn)
-        jobs = fetch_jobs(conn)
+    try:
+        with _open_catalog() as conn:
+            events = query_events(conn, limit=limit)
+            aggregates = summarize_by_volume(conn)
+            volume_meta = fetch_volume_metadata(conn)
+            jobs = fetch_jobs(conn)
+    except sqlite3.OperationalError:
+        return [], [], []
 
     combined = _combine_volume_data(aggregates, volume_meta)
     normalized_jobs = _normalize_jobs(jobs)
@@ -101,8 +125,11 @@ def create_app(*, refresh_seconds: int = 5, event_limit: int = 25) -> Flask:
     @app.route("/api/volumes")
     def volumes_api() -> Any:
         """Return volume metadata rows suitable for remote agents."""
-        with init_db() as conn:
-            records = fetch_volume_metadata(conn)
+        try:
+            with _open_catalog() as conn:
+                records = fetch_volume_metadata(conn)
+        except sqlite3.OperationalError:
+            records = []
 
         rows = build_label_rows(records)
         payload = {
@@ -118,8 +145,11 @@ def create_app(*, refresh_seconds: int = 5, event_limit: int = 25) -> Flask:
         if not path:
             return jsonify({"error": "Missing 'path' query parameter"}), 400
 
-        with init_db() as conn:
-            records = fetch_volume_metadata(conn)
+        try:
+            with _open_catalog() as conn:
+                records = fetch_volume_metadata(conn)
+        except sqlite3.OperationalError:
+            records = []
 
         matched: List[Dict[str, Any]] = []
         for record in records:

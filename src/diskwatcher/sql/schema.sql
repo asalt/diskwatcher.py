@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_path ON events (path);
 CREATE INDEX IF NOT EXISTS idx_events_volume ON events (volume_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_volume_path ON events (volume_id, path);
 
 CREATE TABLE IF NOT EXISTS volumes (
     volume_id TEXT PRIMARY KEY,
@@ -64,6 +65,9 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_directory ON files (directory);
+CREATE INDEX IF NOT EXISTS idx_files_last_event_timestamp ON files (last_event_timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_volumes_last_event_timestamp ON volumes (last_event_timestamp);
 
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,

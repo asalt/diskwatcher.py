@@ -33,7 +33,8 @@ diskwatcher --log-level info run /mnt/e /media/alex
 - Control the initial archival sweep with `--scan/--no-scan` or set
   `diskwatcher config set run.auto_scan false` to disable it by default.
 - The archival sweep logs structured progress every few hundred files so you can
-  monitor long-running scans in `~/.diskwatcher/diskwatcher.log`.
+  monitor long-running scans in `~/.diskwatcher/diskwatcher.log` (or
+  `./.diskwatcher_logs/diskwatcher.log` when the default path is not writable).
 - When you watch multiple volumes, DiskWatcher fan-outs the archival sweep into
   a small pool of worker processes (capped at four by default) so each mount
   catalogs independently before its watcher thread starts tailing live events.
@@ -62,6 +63,10 @@ diskwatcher web --host 0.0.0.0 --port 5000
 
 - Serves a lightweight Flask UI that auto-refreshes with the latest jobs,
   volumes, and event samples from the shared catalog.
+- Uses read-only catalog snapshots during refreshes so status polling does not
+  trigger migration checks on each request.
+- Includes JSON endpoints suitable for remote/agent access (for example
+  `/api/status`, `/api/volumes`, `/api/volumes/by-path?path=/mnt/e`).
 - Adjust refresh cadence or event depth with `--refresh` / `--event-limit`.
 
 ### Inspect status
@@ -110,6 +115,8 @@ diskwatcher dashboard --limit 15
 ```
 
 - Shows the most recently touched files with their volume, directory, and event counts.
+- Reads from the derived `files`/`volumes` metadata tables for fast results on
+  large catalogs (with a legacy events fallback when metadata is unavailable).
 - Pass `--json` to feed the aggregated `files`/`volumes` payload into notebooks or dashboards.
 
 ### Search cataloged paths
@@ -174,7 +181,8 @@ diskwatcher config unset run.auto_scan
   pointing `DISKWATCHER_CONFIG_DIR` at a different home or by running the CLI with
   `--url` for migration/status snapshots.
 - Structured logs are written to `~/.diskwatcher/diskwatcher.log` via
-  `diskwatcher.utils.logging`.
+  `diskwatcher.utils.logging` (fallback: `./.diskwatcher_logs/diskwatcher.log` if
+  the default log directory cannot be created).
 - CLI helpers such as `status --json` emit transient payloads to stdout, while
   integration tests archive artifacts under `logs/artifacts/` when run with
   `pytest --keep-artifacts` (or a custom `--artifact-dir`).
@@ -183,13 +191,17 @@ diskwatcher config unset run.auto_scan
 ## Programmatic API
 
 ```python
-from diskwatcher.db.connection import init_db
+from diskwatcher.db import init_db, init_db_readonly
 from diskwatcher.db.events import summarize_by_volume
 
 with init_db() as conn:
     rollup = summarize_by_volume(conn)
     for row in rollup:
         print(row["volume_id"], row["total_events"])
+
+# For read-only consumers (dashboards, external agents):
+with init_db_readonly() as conn:
+    rollup = summarize_by_volume(conn)
 ```
 
 `init_db()` now routes through Alembic migrations for file-backed databases, so

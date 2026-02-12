@@ -123,6 +123,29 @@ def summarize_by_volume(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """Return aggregate event counts grouped by volume and directory."""
 
     conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                volume_id,
+                directory,
+                event_count AS total_events,
+                created_count AS created,
+                modified_count AS modified,
+                deleted_count AS deleted,
+                NULL AS first_seen,
+                last_event_timestamp AS last_seen
+            FROM volumes
+            ORDER BY (last_event_timestamp IS NULL), last_event_timestamp DESC, volume_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
+    if rows:
+        return [dict(row) for row in rows]
+
+    # Compatibility fallback for legacy catalogs that only have raw events.
     rows = conn.execute(
         """
         SELECT
@@ -146,6 +169,53 @@ def summarize_files(conn: sqlite3.Connection, limit: int = 20) -> List[Dict[str,
     """Return aggregated file activity ordered by most recent change."""
 
     conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                f.path,
+                f.volume_id,
+                f.directory,
+                (
+                    SELECT COUNT(*)
+                    FROM events AS e
+                    WHERE e.path = f.path
+                      AND e.volume_id = f.volume_id
+                      AND e.directory = f.directory
+                ) AS total_events,
+                (
+                    SELECT MIN(e.timestamp)
+                    FROM events AS e
+                    WHERE e.path = f.path
+                      AND e.volume_id = f.volume_id
+                      AND e.directory = f.directory
+                ) AS first_seen,
+                f.last_event_timestamp AS last_seen,
+                COALESCE(
+                    f.last_event_type,
+                    (
+                        SELECT latest.event_type
+                        FROM events AS latest
+                        WHERE latest.path = f.path
+                          AND latest.volume_id = f.volume_id
+                          AND latest.directory = f.directory
+                        ORDER BY latest.timestamp DESC
+                        LIMIT 1
+                    )
+                ) AS last_event_type
+            FROM files AS f
+            ORDER BY (f.last_event_timestamp IS NULL), f.last_event_timestamp DESC, f.path
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
+    if rows:
+        return [dict(row) for row in rows]
+
+    # Compatibility fallback for legacy catalogs that only have raw events.
     rows = conn.execute(
         """
         SELECT
