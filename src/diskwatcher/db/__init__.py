@@ -1,4 +1,4 @@
-from .connection import init_db, create_schema
+from .connection import init_db, init_db_readonly, create_schema
 from .events import (
     log_event,
     query_events,
@@ -20,6 +20,7 @@ from .jobs import (
 
 __all__ = [
     "init_db",
+    "init_db_readonly",
     "create_schema",
     "log_event",
     "query_events",

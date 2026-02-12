@@ -14,7 +14,14 @@ import typer
 from diskwatcher.core.manager import DiskWatcherManager
 from diskwatcher.core.inspector import suggest_directories
 from diskwatcher.utils import config as config_utils
-from diskwatcher.utils.logging import setup_logging, get_logger, LOG_DIR, LOG_FILE
+from diskwatcher.utils.logging import (
+    LOG_DIR,
+    LOG_FILE,
+    active_log_dir,
+    active_log_file,
+    get_logger,
+    setup_logging,
+)
 from diskwatcher.utils.devices import get_mount_info
 from diskwatcher.db import (
     init_db,
@@ -386,6 +393,9 @@ def config_show(
     except config_utils.ConfigError as exc:
         _emit_config_error(exc)
 
+    active_log_dir_value = active_log_dir()
+    active_log_file_value = active_log_file()
+
     storage_paths = {
         "config_dir": str(config_utils.config_dir()),
         "config_file": str(config_utils.config_path()),
@@ -393,6 +403,8 @@ def config_show(
         "database_file": str(DB_PATH),
         "log_dir": str(LOG_DIR),
         "log_file": str(LOG_FILE),
+        "log_dir_active": str(active_log_dir_value) if active_log_dir_value else None,
+        "log_file_active": str(active_log_file_value) if active_log_file_value else None,
     }
 
     if as_json:
@@ -450,10 +462,23 @@ def config_path_cmd() -> None:
 @app.command()
 def log() -> None:
     """Show recent log entries"""
-    if LOG_FILE.exists():
-        typer.echo(LOG_FILE.read_text())
-    else:
-        typer.echo("No logs found.")
+
+    candidates = []
+    active_path = active_log_file()
+    if active_path is not None:
+        candidates.append(active_path)
+    if LOG_FILE not in candidates:
+        candidates.append(LOG_FILE)
+
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                typer.echo(candidate.read_text())
+                return
+        except OSError as exc:
+            typer.echo(f"Unable to read log file {candidate}: {exc}", err=True)
+
+    typer.echo("No logs found.")
 
 
 def _write_labels_csv(path: Path, columns: List[str], rows: List[Dict[str, Any]]) -> None:

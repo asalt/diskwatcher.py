@@ -25,8 +25,34 @@ def init_db(
         isolation_level=isolation_level,
         timeout=30.0,
     )
-    _configure_connection(conn)
+    _configure_connection(conn, writable=True)
     create_schema(conn)
+    return conn
+
+
+def init_db_readonly(
+    path: Optional[Path] = None,
+    *,
+    check_same_thread: bool = False,
+    isolation_level: Optional[str] = None,
+) -> sqlite3.Connection:
+    """Open the SQLite catalog in read-only mode.
+
+    Unlike `init_db()`, this helper never creates directories, runs migrations,
+    or applies the static schema. It is intended for dashboards and external
+    agents that should not mutate the catalog.
+    """
+
+    target_path = Path(path) if path is not None else DB_PATH
+    target_uri = target_path.expanduser().resolve().as_uri()
+    conn = sqlite3.connect(
+        f"{target_uri}?mode=ro",
+        uri=True,
+        check_same_thread=check_same_thread,
+        isolation_level=isolation_level,
+        timeout=30.0,
+    )
+    _configure_connection(conn, writable=False)
     return conn
 
 
@@ -62,13 +88,14 @@ def create_schema(conn: sqlite3.Connection, schema_path: Path = SCHEMA_PATH) -> 
         )
 
 
-def _configure_connection(conn: sqlite3.Connection) -> None:
+def _configure_connection(conn: sqlite3.Connection, *, writable: bool) -> None:
     """Apply common pragmas so high-volume writes stay resilient."""
 
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 10000")
-    try:
-        conn.execute("PRAGMA journal_mode = WAL")
-    except sqlite3.OperationalError:
-        # WAL is not supported for in-memory databases; ignore quietly.
-        pass
+    if writable:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            # WAL is not supported for in-memory databases; ignore quietly.
+            pass
